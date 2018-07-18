@@ -17,6 +17,7 @@ import datetime
 import xml.etree.ElementTree as ET
 
 from pylab import rcParams
+
 rcParams['figure.figsize'] = 15, 10
 
 pd.options.mode.chained_assignment = None
@@ -28,6 +29,7 @@ try:
 
 except ImportError:
     pass
+
 
 def printmes(x):
     """Attempts to turn print statements into messages in ArcGIS tools.
@@ -43,7 +45,8 @@ def printmes(x):
     except ModuleNotFoundError:
         print(x)
 
-#-----------------------------------------------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------------------------------------------------
 # These functions align relative transducer reading to manual data
 
 def fix_drift(well, manualfile, meas='Level', corrwl='corrwl', manmeas='MeasuredDTW', outcolname='DTW_WL'):
@@ -95,9 +98,6 @@ def fix_drift(well, manualfile, meas='Level', corrwl='corrwl', manmeas='Measured
         well.index.name = 'DateTime'
     breakpoints = breakpoints.values
     manualfile.loc[:, 'julian'] = manualfile.index.to_julian_date()
-
-    print(breakpoints)
-    print(pd.to_datetime(well.index))
 
     for i in range(len(breakpoints) - 1):
         # Break up pandas dataframe time series into pieces based on timing of manual measurements
@@ -168,84 +168,162 @@ def fix_drift(well, manualfile, meas='Level', corrwl='corrwl', manmeas='Measured
 
     return wellbarofixed, drift_info
 
-def get_stickup_elev(site_number, well_table):
-    stdata = well_table[well_table['AltLocationID'] == str(site_number)]
-    stickup = float(stdata['Offset'].values[0])
-    well_elev = float(stdata['Altitude'].values[0])
-    return stickup, well_elev
+
+class WaterElevation(object):
+    def __init__(self, site_number, well_table=None, conn_file_root=None):
+        """
+        :param site_number: Well id number
+        :param well_table: Table of well data
+        :param conn_file_root: path to connection file if you want the class to retrieve your table from a GIS table
+        :return: stickup, well_elev
+        """
+        self.site_number = site_number
+        self.conn_file_root = conn_file_root
+
+        if well_table:
+            self.well_table = well_table
+        else:
+            arcpy.env.workspace = self.conn_file_root
+            welltable = "UGGP.UGGPADMIN.UGS_NGWMN_Monitoring_Locations"
+            self.well_table = table_to_pandas_dataframe(welltable, query="AltLocationID is not Null")
+        self.stdata = self.well_table[self.well_table['AltLocationID'] == int(self.site_number)]
+        self.well_elev = float(self.stdata['VerticalMeasure'].values[0])
+        self.stickup = 0
+        return
+
+    def get_gw_elevs(self, manual, stable_elev=True):
+        """
+        Gets basic well parameters and most recent groundwater level data for a well id for dtw calculations.
+        :param manual: Pandas Dataframe of manual data
+        :param stable_elev: boolean; if False, stickup is retrieved from the manual measurements table;
+        :return: manual table with new fields for depth to water and groundwater elevation
+        """
+
+        # some users might have incompatible column names
+        old_fields = {'DateTime': 'READINGDATE',
+                      'Location ID': 'LOCATIONID',
+                      'Water Level (ft)': 'DTWBELOWCASING'}
+        manual.rename(columns=old_fields, inplace=True)
+
+        man_sub = manual[manual['LOCATIONID'] == int(self.site_number)]
+
+        if stable_elev:
+            # Selects well stickup from well table; if its not in the well table, then sets value to zero
+            if self.stdata['Offset'].values[0] is None:
+                self.stickup = 0
+                printmes('Well ID {:} missing stickup!'.format(self.site_number))
+            else:
+                self.stickup = float(self.stdata['Offset'].values[0])
+        else:
+            # uses measured stickup data from manual table
+            self.stickup = man_sub.loc[man_sub.last_valid_index(), 'Current Stickup Height']
+
+        man_sub.loc[:, 'MeasuredDTW'] = man_sub['DTWBELOWCASING'] * -1
+        man_sub.loc[:, 'WATERELEVATION'] = man_sub['MeasuredDTW'].apply(lambda x: self.well_elev + (x + self.stickup),
+                                                                        1)
+
+        return man_sub
+
+    def prepare_fieldnames(self, df, level='Level', dtw='DTW_WL'):
+        """
+        This function adds the necessary field names to import well data into the SDE database.
+        :param df: pandas DataFrame of processed well data
+        :param level: raw transducer level from new_trans_imp, new_xle_imp, or new_csv_imp functions
+        :param dtw: drift-corrected depth to water from fix_drift function
+        :return: processed df with necessary field names for import
+        """
+
+        df['MEASUREDLEVEL'] = df[level]
+        df['MEASUREDDTW'] = df[dtw] * -1
+        df['DTWBELOWGROUNDSURFACE'] = df['MEASUREDDTW'].apply(lambda x: x - self.stickup, 1)
+        df['WATERELEVATION'] = df['DTWBELOWGROUNDSURFACE'].apply(lambda x: self.well_elev - x, 1)
+        df['TAPE'] = 0
+        df['LOCATIONID'] = self.site_number
+
+        df.sort_index(inplace=True)
+
+        fieldnames = ['READINGDATE', 'MEASUREDLEVEL', 'MEASUREDDTW', 'DRIFTCORRECTION',
+                      'TEMP', 'LOCATIONID', 'BAROEFFICIENCYLEVEL',
+                      'WATERELEVATION', 'TAPE']
+
+        if 'Temperature' in df.columns:
+            df.rename(columns={'Temperature': 'TEMP'}, inplace=True)
+
+        if 'TEMP' in df.columns:
+            df['TEMP'] = df['TEMP'].apply(lambda x: np.round(x, 4), 1)
+        else:
+            df['TEMP'] = None
+
+        if 'BAROEFFICIENCYLEVEL' in df.columns:
+            pass
+        else:
+            df['BAROEFFICIENCYLEVEL'] = 0
+        # subset bp df and add relevant fields
+        df.index.name = 'READINGDATE'
+
+        subset = df.reset_index()
+
+        return subset, fieldnames
 
 
-def get_gw_elevs(site_number, well_table, manual, stable_elev=True):
-    """
-    Gets basic well parameters and most recent groundwater level data for a well id for dtw calculations.
-    :param site_number: well site number in the site table
-    :param manual: Pandas Dataframe of manual data
-    :param table: pandas dataframe of site table;
-    :param lev_table: groundwater level table; defaults to "UGGP.UGGPADMIN.UGS_GW_reading"
-    :return: stickup, well_elev, be, maxdate, dtw, wl_elev
-    """
-
-    stdata = well_table[well_table['WellID'] == str(site_number)]
-    man_sub = manual[manual['Location ID'] == int(site_number)]
-    well_elev = float(stdata['Altitude'].values[0])
-
-    if stable_elev:
-        stickup = float(stdata['Offset'].values[0])
-    else:
-        stickup = man_sub['Current Stickup Height']
-
-    # manual = manual['MeasuredDTW'].to_frame()
-    man_sub.loc[:, 'MeasuredDTW'] = man_sub['Water Level (ft)'] * -1
-    man_sub.loc[:, 'Meas_GW_Elev'] = man_sub['MeasuredDTW'].apply(lambda x: well_elev + (x + stickup), 1)
-
-    return man_sub, stickup, well_elev
-
-#-----------------------------------------------------------------------------------------------------------------------
-# These functions import data into an SDE database
-
-
-def imp_one_well(well_file, baro_file, man_startdate, man_start_level, man_endate, man_end_level,
-                 conn_file_root,
-                 wellid, be=None, well_table="UGGP.UGGPADMIN.UGS_NGWMN_Monitoring_Locations",
-                 gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading", drift_tol=0.3, override=False):
-
-    arcpy.env.workspace = conn_file_root
-
+def trans_type(well_file):
+    """Uses information from the raw transducer file to determine the type of transducer used.
+    :param well_file: full path to raw transducer file
+    :returns: transducer type"""
     if os.path.splitext(well_file)[1] == '.xle':
+        trans_type = 'Solinst'
+    elif os.path.splitext(well_file)[1] == '.lev':
         trans_type = 'Solinst'
     else:
         trans_type = 'Global Water'
 
     printmes('Trans type for well is {:}.'.format(trans_type))
+    return trans_type
 
-    welltable = table_to_pandas_dataframe(well_table, query="AlternateID is not Null")
 
+# -----------------------------------------------------------------------------------------------------------------------
+# These functions import data into an SDE database
+
+
+def imp_one_well(well_file, baro_file, man_startdate, man_start_level, man_endate, man_end_level,
+                 conn_file_root, wellid, be=None,
+                 gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading", drift_tol=0.3, override=False):
+
+    arcpy.env.workspace = conn_file_root
+
+    # convert raw files to dataframes
     well = new_trans_imp(well_file)
     baro = new_trans_imp(baro_file)
 
-    corrwl = well_baro_merge(well, baro, vented=(trans_type != 'Solinst'))
+    # align baro and well timeseries; remove bp if nonvented
+    corrwl = well_baro_merge(well, baro, vented=(trans_type(well_file) != 'Solinst'))
 
+    # bring in manual data and create a dataframe from it
+    man = pd.DataFrame(
+        {'DateTime': [man_startdate, man_endate],
+         'Water Level (ft)': [man_start_level, man_end_level],
+         'Location ID': wellid}).set_index('DateTime')
+    printmes(man)
+
+    # pull stickup and elevation from well table; calculate water level elevations
+    wtr_elevs = WaterElevation(wellid, conn_file_root=conn_file_root)
+    man = wtr_elevs.get_gw_elevs(man)
+
+    # correct for barometric efficiency if available
     if be:
-        corrwl = correct_be(wellid, welltable, corrwl, be=be)
+        corrwl, be = correct_be(wellid, wtr_elevs.well_table, corrwl, be=be)
         corrwl['corrwl'] = corrwl['BAROEFFICIENCYLEVEL']
 
-    stickup, well_elev = get_stickup_elev(wellid, well_table)
-
-    man = pd.DataFrame(
-        {'DateTime': [man_startdate, man_endate], 'MeasuredDTW': [man_start_level, man_end_level]}).set_index(
-        'DateTime')
-    printmes(man)
-    man['Meas_GW_Elev'] = well_elev - (man['MeasuredDTW'] - stickup)
-
-    man['MeasuredDTW'] = man['MeasuredDTW'] * -1
-
+    # adjust for linear transducer drift between manual measurements
     dft = fix_drift(corrwl, man, meas='corrwl', manmeas='MeasuredDTW')
     drift = round(float(dft[1]['drift'].values[0]), 3)
-    printmes('Drift for well {:} is {:}.'.format(wellid, drift))
+    printmes('Drift for well {:} is {:.3f}.'.format(wellid, drift))
     df = dft[0]
 
-    rowlist, fieldnames = prepare_fieldnames(df, wellid, stickup, well_elev)
+    # add, remove, and arrange column names to match database format schema
+    rowlist, fieldnames = wtr_elevs.prepare_fieldnames(df)
 
+    # QA/QC to reject data if it exceeds user-based threshhold
     if drift <= drift_tol:
         edit_table(rowlist, gw_reading_table, fieldnames)
         printmes('Well {:} successfully imported!'.format(wellid))
@@ -256,7 +334,8 @@ def imp_one_well(well_file, baro_file, man_startdate, man_start_level, man_endat
         printmes('Well {:} drift greater than tolerance!'.format(wellid))
     return df, man, be, drift
 
-def simp_imp_well(well_table, file, baro_out, wellid, manual, stbl_elev=True,
+
+def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_root, stbl_elev=True, be=None,
                   gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading", drift_tol=0.3, override=False):
     """
     Imports single well
@@ -271,53 +350,28 @@ def simp_imp_well(well_table, file, baro_out, wellid, manual, stbl_elev=True,
     :param override:
     :return:
     """
-    # import well file
-    well = new_trans_imp(file)
 
-    file_ext = os.path.splitext(file)[1]
-    if file_ext == '.xle':
-        trans_type = 'Solinst'
-    else:
-        trans_type = 'Global Water'
+    # import well file
+    well = new_trans_imp(well_file)
+    wtr_elevs = WaterElevation(wellid, well_table = well_table, conn_file_root=conn_file_root)
+    man = wtr_elevs.get_gw_elevs(manual, stbl_elev=stbl_elev)
+
     try:
-        baroid = well_table.loc[wellid, 'BaroLoggerType']
+        baroid = wtr_elevs.well_table.loc[wellid, 'BaroLoggerType']
         printmes('{:}'.format(baroid))
         corrwl = well_baro_merge(well, baro_out[str(baroid)], barocolumn='MEASUREDLEVEL',
-                                 vented=(trans_type != 'Solinst'))
+                                 vented=(trans_type(well_file) != 'Solinst'))
     except:
         corrwl = well_baro_merge(well, baro_out['9003'], barocolumn='MEASUREDLEVEL',
-                                 vented=(trans_type != 'Solinst'))
+                                 vented=(trans_type(well_file) != 'Solinst'))
 
-    # be, intercept, r = clarks(corrwl, 'barometer', 'corrwl')
-    # correct barometric efficiency
-    wls, be = correct_be(wellid, well_table, corrwl)
+    if be:
+        corrwl, be = correct_be(wellid, wtr_elevs.well_table, corrwl, be=be)
+        corrwl['corrwl'] = corrwl['BAROEFFICIENCYLEVEL']
 
-    # get manual groundwater elevations
-    # man, stickup, well_elev = self.get_gw_elevs(wellid, well_table, manual, stable_elev = stbl_elev)
-    stdata = well_table[well_table['WellID'] == str(wellid)]
-    man_sub = manual[manual['LOCATIONID'] == int(wellid)]
-    well_elev = float(stdata['Altitude'].values[0])  # Should be in feet
-
-    if stbl_elev:
-        if stdata['Offset'].values[0] is None:
-            stickup = 0
-            printmes('Well ID {:} missing stickup!'.format(wellid))
-        else:
-            stickup = float(stdata['Offset'].values[0])
-    else:
-
-        stickup = man_sub.loc[man_sub.last_valid_index(), 'Current Stickup Height']
-
-    # manual = manual['MeasuredDTW'].to_frame()
-    man_sub.loc[:, 'MeasuredDTW'] = man_sub['DTWBELOWCASING'] * -1
-    man_sub.loc[:, 'Meas_GW_Elev'] = man_sub.loc[:, 'WATERELEVATION']
-    # man_sub.loc[:, 'Meas_GW_Elev'] = man_sub['MeasuredDTW'].apply(lambda x: float(well_elev) + (x + float(stickup)),1)
-    printmes('Stickup: {:}, Well Elev: {:}'.format(stickup, well_elev))
-
-    # fix transducer drift
-
-    dft = fix_drift(wls, man_sub, meas='BAROEFFICIENCYLEVEL', manmeas='MeasuredDTW')
-    drift = np.round(float(dft[1]['drift'].values[0]), 3)
+    dft = fix_drift(corrwl, man, meas='corrwl', manmeas='MeasuredDTW')
+    drift = round(float(dft[1]['drift'].values[0]), 3)
+    printmes('Drift for well {:} is {:}.'.format(wellid, drift))
 
     df = dft[0]
     df.sort_index(inplace=True)
@@ -328,7 +382,7 @@ def simp_imp_well(well_table, file, baro_out, wellid, manual, stbl_elev=True,
 
     printmes("Last database date is {:}. First transducer reading is on {:}.".format(read_max, first_index))
 
-    rowlist, fieldnames = prepare_fieldnames(df, wellid, stickup, well_elev)
+    rowlist, fieldnames = wtr_elevs.prepare_fieldnames(df)
 
     if (read_max is None or read_max < first_index) and (drift < drift_tol):
         edit_table(rowlist, gw_reading_table, fieldnames)
@@ -344,12 +398,7 @@ def simp_imp_well(well_table, file, baro_out, wellid, manual, stbl_elev=True,
         printmes('Dates later than import data for well {:} already exist!'.format(wellid))
         pass
 
-    # except (ValueError, ZeroDivisionError):
-
-    #   drift = -9999
-    #    df = corrwl
-    #    pass
-    return rowlist, man_sub, be, drift
+    return rowlist, man, be, drift
 
 
 def upload_bp_data(df, site_number, return_df=False, gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading"):
@@ -392,7 +441,8 @@ def upload_bp_data(df, site_number, return_df=False, gw_reading_table="UGGP.UGGP
         printmes('Dates later than import data for this station already exist!')
         pass
 
-#-----------------------------------------------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------------------------------------------------
 # The following modify and query an SDE database, assuming the user has a connection
 
 def find_extreme(site_number, gw_table="UGGP.UGGPADMIN.UGS_GW_reading", extma='max'):
@@ -412,7 +462,7 @@ def find_extreme(site_number, gw_table="UGGP.UGGPADMIN.UGS_GW_reading", extma='m
     else:
         sort = 'ASC'
     query = "LOCATIONID = '{:}'".format(site_number)
-    field_names = ['READINGDATE', 'LOCATIONID', 'DTWBELOWGROUNDSURFACE', 'WATERELEVATION']
+    field_names = ['READINGDATE', 'LOCATIONID', 'MEASUREDDTW', 'WATERELEVATION']
     sql_sn = ('TOP 1', 'ORDER BY READINGDATE {:}'.format(sort))
     # use a search cursor to iterate rows
     dateval, dtw, wlelev = [], [], []
@@ -429,6 +479,7 @@ def find_extreme(site_number, gw_table="UGGP.UGGPADMIN.UGS_GW_reading", extma='m
         return None, 0, 0
     else:
         return dateval[0], dtw[0], wlelev[0]
+
 
 def get_gap_data(site_number, enviro, gap_tol=0.5,
                  gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading"):
@@ -469,6 +520,7 @@ def get_gap_data(site_number, enviro, gap_tol=0.5,
     df['gap_start'] = df.apply(lambda x: rowIndex(x) - x['hr_diff'] if x['is_gap'] else pd.NaT, axis=1)
     df = df[df['is_gap'] == True]
     return df
+
 
 def get_location_data(site_number, enviro, first_date=None, last_date=None, limit=None,
                       gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading"):
@@ -518,7 +570,8 @@ def barodistance(wellinfo):
     wellinfo['closest_baro'] = wellinfo[['pw03', 'pw10', 'pw19']].T.idxmin()
     return wellinfo
 
-#-----------------------------------------------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------------------------------------------------
 # These are the core functions that are used to import and export data from an SDE database
 
 def get_field_names(table):
@@ -528,49 +581,6 @@ def get_field_names(table):
         field_names.append(field.name)
     field_names.remove('OBJECTID')
     return field_names
-
-def prepare_fieldnames(df, wellid, stickup, well_elev, level='Level', dtw='DTW_WL'):
-    """
-    This function adds the necessary field names to import well data into the SDE database.
-    :param df: pandas DataFrame of processed well data
-    :param wellid: wellid (alternateID) of well in Stations Table
-    :param level: raw transducer level from new_trans_imp, new_xle_imp, or new_csv_imp functions
-    :param dtw: drift-corrected depth to water from fix_drift function
-    :return: processed df with necessary field names for import
-    """
-
-    df['MEASUREDLEVEL'] = df[level]
-    df['MEASUREDDTW'] = df[dtw] * -1
-    df['DTWBELOWCASING'] = df['MEASUREDDTW']
-    df['DTWBELOWGROUNDSURFACE'] = df['MEASUREDDTW'].apply(lambda x: x - stickup, 1)
-    df['WATERELEVATION'] = df['DTWBELOWGROUNDSURFACE'].apply(lambda x: well_elev - x, 1)
-    df['TAPE'] = 0
-    df['LOCATIONID'] = wellid
-
-    df.sort_index(inplace=True)
-
-    fieldnames = ['READINGDATE', 'MEASUREDLEVEL', 'MEASUREDDTW', 'DRIFTCORRECTION',
-                  'TEMP', 'LOCATIONID', 'DTWBELOWCASING', 'BAROEFFICIENCYLEVEL',
-                  'DTWBELOWGROUNDSURFACE', 'WATERELEVATION', 'TAPE']
-
-    if 'Temperature' in df.columns:
-        df.rename(columns={'Temperature': 'TEMP'}, inplace=True)
-
-    if 'TEMP' in df.columns:
-        df['TEMP'] = df['TEMP'].apply(lambda x: np.round(x, 4), 1)
-    else:
-        df['TEMP'] = None
-
-    if 'BAROEFFICIENCYLEVEL' in df.columns:
-        pass
-    else:
-        df['BAROEFFICIENCYLEVEL'] = 0
-    # subset bp df and add relevant fields
-    df.index.name = 'READINGDATE'
-
-    subset = df.reset_index()
-
-    return subset, fieldnames
 
 
 def table_to_pandas_dataframe(table, field_names=None, query=None, sql_sn=(None, None)):
@@ -636,8 +646,7 @@ def edit_table(df, gw_reading_table, fieldnames):
         printmes('No data imported!')
 
 
-
-#-----------------------------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------------------------
 # These scripts remove outlier data and filter the time series of jumps and erratic measurements
 
 def dataendclean(df, x, inplace=False):
@@ -673,6 +682,7 @@ def dataendclean(df, x, inplace=False):
     except IndexError:
         printmes('No Jumps')
     return df
+
 
 def smoother(df, p, win=30, sd=3):
     """Remove outliers from a pandas dataframe column and fill with interpolated values.
@@ -722,6 +732,7 @@ def smoother(df, p, win=30, sd=3):
     df = df.interpolate(method='time', limit=30)
     df = df[1:-1]
     return df
+
 
 def rollmeandiff(df1, p1, df2, p2, win):
     """Returns the rolling mean difference of two columns from two different dataframes
@@ -787,7 +798,8 @@ def jumpfix(df, meas, threashold=0.005, return_jump=False):
     else:
         return df1
 
-#-----------------------------------------------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------------------------------------------------
 # The following scripts align and remove barometric pressure data
 
 def correct_be(site_number, well_table, welldata, be=None, meas='corrwl', baro='barometer'):
@@ -807,6 +819,7 @@ def correct_be(site_number, well_table, welldata, be=None, meas='corrwl', baro='
         welldata['BAROEFFICIENCYLEVEL'] = welldata[[meas, baro]].apply(lambda x: x[0] + be * x[1], 1)
 
     return welldata, be
+
 
 def hourly_resample(df, bse=0, minutes=60):
     """
@@ -833,6 +846,7 @@ def hourly_resample(df, bse=0, minutes=60):
 
     df = df.resample(str(minutes) + 'Min', closed='left', label='left', base=bse).mean()
     return df
+
 
 def well_baro_merge(wellfile, barofile, barocolumn='Level', wellcolumn='Level', outcolumn='corrwl',
                     vented=False, sampint=60):
@@ -876,6 +890,7 @@ def well_baro_merge(wellfile, barofile, barocolumn='Level', wellcolumn='Level', 
     wellbaro.loc[wellbaro.index[0], outcolumn] = first_well
     return wellbaro
 
+
 def fcl(df, dtObj):
     """Finds closest date index in a dataframe to a date object
     Args:
@@ -887,9 +902,11 @@ def fcl(df, dtObj):
     taken from: http://stackoverflow.com/questions/15115547/find-closest-row-of-dataframe-to-given-time-in-pandas
     """
     return df.iloc[np.argmin(np.abs(pd.to_datetime(df.index) - dtObj))]  # remove to_pydatetime()
-#-----------------------------------------------------------------------------------------------------------------------
 
-#-----------------------------------------------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------------------------------------------------
 # Raw transducer import functions - these convert raw lev, xle, and csv files to Pandas Dataframes for processing
 
 def new_lev_imp(infile):
@@ -1031,6 +1048,7 @@ def new_xle_imp(infile):
 
     return f
 
+
 def new_csv_imp(infile):
     """This function uses an exact file path to upload a csv transducer file.
 
@@ -1156,7 +1174,8 @@ def new_trans_imp(infile):
         printmes('Bad File')
         return
 
-#-----------------------------------------------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------------------------------------------------
 # Summary scripts - these extract transducer headers and summarize them in tables
 
 def getfilename(path):
@@ -1170,6 +1189,7 @@ def getfilename(path):
         name of file as string
     """
     return path.split('\\').pop().split('/').pop().rsplit('.', 1)[0]
+
 
 def compile_end_beg_dates(infile):
     """ Searches through directory and compiles transducer files, returning a dataframe of the file name,
@@ -1200,6 +1220,7 @@ def compile_end_beg_dates(infile):
     df = pd.DataFrame(dflist, columns=['filename', 'beginning', 'end'])
     return df
 
+
 def xle_head_table(folder):
     """Creates a Pandas DataFrame containing header information from all xle files in a folder
     Args:
@@ -1212,7 +1233,7 @@ def xle_head_table(folder):
     """
     # open text file
     df = {}
-    for infile in glob.glob(folder+"//*.xle", recursive=True):
+    for infile in glob.glob(folder + "//*.xle", recursive=True):
         basename = os.path.basename(folder + infile)
         with io.open(infile, 'r', encoding="ISO-8859-1") as f:
             contents = f.read()
@@ -1225,7 +1246,6 @@ def xle_head_table(folder):
         for child in tree[2]:
             df1[child.tag] = child.text
 
-
         df[basename[:-4]] = df1
     allwells = pd.DataFrame(df).T
     allwells.index.name = 'filename'
@@ -1233,6 +1253,7 @@ def xle_head_table(folder):
     allwells['fileroot'] = allwells.index
     allwells['full_filepath'] = allwells['fileroot'].apply(lambda x: folder + x + '.xle', 1)
     return allwells
+
 
 def csv_info_table(folder):
     csv = {}
@@ -1264,6 +1285,7 @@ def csv_info_table(folder):
     df.set_index('filename', inplace=True)
     return df, csv
 
+
 def getwellid(infile, wellinfo):
     """Specialized function that uses a well info table and file name to lookup a well's id number"""
     m = re.search("\d", getfilename(infile))
@@ -1275,7 +1297,8 @@ def getwellid(infile, wellinfo):
     wellid = wellinfo[wellinfo['Well'] == wellname]['WellID'].values[0]
     return wellname, wellid
 
-#-----------------------------------------------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------------------------------------------------
 
 class baroimport(object):
     def __init__(self):
@@ -1381,9 +1404,10 @@ class baroimport(object):
         return
 
 
-#----------------------Class to import well data using arcgis interface-------------------------------------------------
+# ----------------------Class to import well data using arcgis interface-------------------------------------------------
 class wellimport(object):
     """ Each function in this class represents the main operation perfored by a tool in the ArcToolbox"""
+
     def __init__(self):
         self.sde_conn = None
         self.well_file = None
@@ -1409,6 +1433,7 @@ class wellimport(object):
         self.baro_comp_file = None
         self.to_import = None
         self.idget = None
+        self.sampint = None
 
     def read_xle(self):
         well = new_xle_imp(self.well_file)
@@ -1485,7 +1510,7 @@ class wellimport(object):
 
         corrwl = well_baro_merge(well, baro, barocolumn='Level', wellcolumn='Level', outcolumn='corrwl',
                                  vented=False,
-                                 sampint=60)
+                                 sampint=self.sampint)
 
         man = pd.DataFrame(
             {'DateTime': [self.man_startdate, self.man_enddate],
@@ -1686,7 +1711,7 @@ class wellimport(object):
         return
 
 
-#---------------ArcGIS Python Toolbox Classes and Functions-------------------------------------------------------------
+# ---------------ArcGIS Python Toolbox Classes and Functions-------------------------------------------------------------
 
 def parameter(displayName, name, datatype, parameterType='Required', direction='Input', defaultValue=None):
     """The parameter implementation makes it a little difficult to quickly create parameters with defaults. This method
@@ -1705,6 +1730,7 @@ def parameter(displayName, name, datatype, parameterType='Required', direction='
     # return complete parameter object
     return param
 
+
 class Toolbox(object):
     def __init__(self):
         self.label = "Loggerloader"
@@ -1713,6 +1739,7 @@ class Toolbox(object):
         # List of tool classes associated with this toolbox
         self.tools = [SingleTransducerImport, MultBarometerImport, MultTransducerImport, SimpleBaroFix,
                       SimpleBaroDriftFix, XLERead]
+
 
 class SingleTransducerImport(object):
     def __init__(self):
@@ -1785,6 +1812,7 @@ class SingleTransducerImport(object):
         wellimp.one_well()
         printmes(arcpy.GetMessages())
         return
+
 
 class MultBarometerImport(object):
     def __init__(self):
@@ -1903,6 +1931,7 @@ class MultBarometerImport(object):
         printmes(arcpy.GetMessages())
         return
 
+
 class MultTransducerImport(object):
     def __init__(self):
         self.label = 'Multiple Transducer Import to SDE'
@@ -2009,6 +2038,7 @@ class MultTransducerImport(object):
         printmes(arcpy.GetMessages())
         return
 
+
 class SimpleBaroFix(object):
     def __init__(self):
         self.label = "Simple Barometer Pressure Removal"
@@ -2048,6 +2078,7 @@ class SimpleBaroFix(object):
         wellimp.remove_bp()
         printmes(arcpy.GetMessages())
 
+
 class SimpleBaroDriftFix(object):
     def __init__(self):
         self.label = "Simple Barometer Pressure and Drift Removal (separate files)"
@@ -2060,6 +2091,7 @@ class SimpleBaroDriftFix(object):
             parameter("Date of Final Manual Measurement", "enddate", "Date"),
             parameter("Initial Manual Measurement", "startlevel", "GPDouble"),
             parameter("Final Manual Measurement", "endlevel", "GPDouble"),
+            parameter("Measurement Frequency (minutes)","GPDouble"),
             parameter("Output File", "save_location", "DEFile", direction="Output"),
             parameter("Create a Chart?", "should_plot", "GPBoolean", parameterType="Optional"),
             parameter("Chart output location (end with .pdf)", "chart_out", "DEFile", parameterType="Optional",
@@ -2067,7 +2099,8 @@ class SimpleBaroDriftFix(object):
         ]
         self.parameters[0].filter.list = ['csv', 'xle']
         self.parameters[1].filter.list = ['csv', 'xle']
-        self.parameters[6].filter.list = ['csv']
+        self.parameters[6].defaultEnvironmentName = 60
+        self.parameters[7].filter.list = ['csv']
         # self.parameters[8].filter.list = ['pdf']
 
     def getParameterInfo(self):
@@ -2097,11 +2130,13 @@ class SimpleBaroDriftFix(object):
         wellimp.man_enddate = parameters[3].valueAsText
         wellimp.man_start_level = parameters[4].value
         wellimp.man_end_level = parameters[5].value
-        wellimp.save_location = parameters[6].valueAsText
-        wellimp.should_plot = parameters[7].value
-        wellimp.chart_out = parameters[8].valueAsText
+        wellimp.sampint = parameters[6].value
+        wellimp.save_location = parameters[7].valueAsText
+        wellimp.should_plot = parameters[8].value
+        wellimp.chart_out = parameters[9].valueAsText
         wellimp.remove_bp_drift()
         printmes(arcpy.GetMessages())
+
 
 class XLERead(object):
     def __init__(self):
