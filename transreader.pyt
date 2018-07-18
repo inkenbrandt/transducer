@@ -2091,7 +2091,7 @@ class SimpleBaroDriftFix(object):
             parameter("Date of Final Manual Measurement", "enddate", "Date"),
             parameter("Initial Manual Measurement", "startlevel", "GPDouble"),
             parameter("Final Manual Measurement", "endlevel", "GPDouble"),
-            parameter("Measurement Frequency (minutes)","GPDouble"),
+            parameter("Measurement Frequency (minutes)","sampint","GPDouble"),
             parameter("Output File", "save_location", "DEFile", direction="Output"),
             parameter("Create a Chart?", "should_plot", "GPBoolean", parameterType="Optional"),
             parameter("Chart output location (end with .pdf)", "chart_out", "DEFile", parameterType="Optional",
