@@ -180,12 +180,12 @@ class WaterElevation(object):
         self.site_number = site_number
         self.conn_file_root = conn_file_root
 
-        if well_table:
-            self.well_table = well_table
-        else:
+        if well_table is None:
             arcpy.env.workspace = self.conn_file_root
             welltable = "UGGP.UGGPADMIN.UGS_NGWMN_Monitoring_Locations"
             self.well_table = table_to_pandas_dataframe(welltable, query="AltLocationID is not Null")
+        else:
+            self.well_table = well_table
         self.stdata = self.well_table[self.well_table['AltLocationID'] == int(self.site_number)]
         self.well_elev = float(self.stdata['VerticalMeasure'].values[0])
         self.stickup = 0
@@ -359,10 +359,10 @@ def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_roo
     try:
         baroid = wtr_elevs.well_table.loc[wellid, 'BaroLoggerType']
         printmes('{:}'.format(baroid))
-        corrwl = well_baro_merge(well, baro_out[str(baroid)], barocolumn='MEASUREDLEVEL',
+        corrwl = well_baro_merge(well, baro_out.loc[baroid], barocolumn='MEASUREDLEVEL',
                                  vented=(trans_type(well_file) != 'Solinst'))
     except:
-        corrwl = well_baro_merge(well, baro_out['9003'], barocolumn='MEASUREDLEVEL',
+        corrwl = well_baro_merge(well, baro_out.loc[9003], barocolumn='MEASUREDLEVEL',
                                  vented=(trans_type(well_file) != 'Solinst'))
 
     if be:
@@ -401,7 +401,7 @@ def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_roo
     return rowlist, man, be, drift
 
 
-def upload_bp_data(df, site_number, return_df=False, gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading"):
+def upload_bp_data(df, site_number, return_df=False, overide=False, gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading"):
     import arcpy
 
     df.sort_index(inplace=True)
@@ -410,7 +410,7 @@ def upload_bp_data(df, site_number, return_df=False, gw_reading_table="UGGP.UGGP
     # Get last reading at the specified location
     read_max, dtw, wlelev = find_extreme(site_number)
 
-    if read_max is None or read_max < first_index:
+    if read_max is None or read_max < first_index or overide is True:
 
         df['MEASUREDLEVEL'] = df['Level']
         df['TAPE'] = 0
@@ -481,14 +481,32 @@ def find_extreme(site_number, gw_table="UGGP.UGGPADMIN.UGS_GW_reading", extma='m
         return dateval[0], dtw[0], wlelev[0]
 
 
-def get_gap_data(site_number, enviro, gap_tol=0.5,
+def get_gap_data(site_number, enviro, gap_tol=0.5, first_date=None, last_date=None,
                  gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading"):
-    arcpy.env.workspace = enviro
-    first_date = datetime.datetime(1900, 1, 1)
-    last_date = datetime.datetime.now()
+    """
 
-    query_txt = "LOCATIONID = '{:}' AND TAPE = 0"
-    query = query_txt.format(site_number)
+    :param site_number: List of Location ID of time series data to be processed
+    :param enviro: workspace of SDE table
+    :param gap_tol: gap tolerance in days; the smallest gap to look for; defaults to half a day (0.5)
+    :param first_date: begining of time interval to search; defaults to 1/1/1900
+    :param last_date: end of time interval to search; defaults to current day
+    :param gw_reading_table: Name of SDE table in workspace to use
+    :return: pandas dataframe with gap information
+    """
+    arcpy.env.workspace = enviro
+
+    if first_date is None:
+        first_date = datetime.datetime(1900, 1, 1)
+    if last_date is None:
+        last_date = datetime.datetime.now()
+
+    if type(site_number) == list:
+        pass
+    else:
+        site_number = [site_number]
+
+    query_txt = "LOCATIONID IN({:}) AND TAPE = 0 AND READINGDATE >= '{:}' AND READINGDATE <= '{:}'"
+    query = query_txt.format(','.join([str(i) for i in site_number]),first_date,last_date)
 
     sql_sn = (None, 'ORDER BY READINGDATE ASC')
 
@@ -522,7 +540,7 @@ def get_gap_data(site_number, enviro, gap_tol=0.5,
     return df
 
 
-def get_location_data(site_number, enviro, first_date=None, last_date=None, limit=None,
+def get_location_data(site_numbers, enviro, first_date=None, last_date=None, limit=None,
                       gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading"):
     arcpy.env.workspace = enviro
     if not first_date:
@@ -536,8 +554,12 @@ def get_location_data(site_number, enviro, first_date=None, last_date=None, limi
     if not last_date or last_date > datetime.datetime.now():
         last_date = datetime.datetime.now()
 
-    query_txt = "LOCATIONID = '{:}' and (READINGDATE >= '{:%m/%d/%Y}' and READINGDATE <= '{:%m/%d/%Y}')"
-    query = query_txt.format(site_number, first_date, last_date + datetime.timedelta(days=1))
+    query_txt = "LOCATIONID in({:}) and (READINGDATE >= '{:%m/%d/%Y}' and READINGDATE <= '{:%m/%d/%Y}')"
+    if type(site_numbers) == list:
+        site_numbers = ",".join([str(i) for i in site_numbers])
+    else:
+        pass
+    query = query_txt.format(site_numbers, first_date, last_date + datetime.timedelta(days=1))
     printmes(query)
     sql_sn = (limit, 'ORDER BY READINGDATE ASC')
 
@@ -546,7 +568,7 @@ def get_location_data(site_number, enviro, first_date=None, last_date=None, limi
     readings = table_to_pandas_dataframe(gw_reading_table, fieldnames, query, sql_sn)
     readings.set_index('READINGDATE', inplace=True)
     if len(readings) == 0:
-        printmes('No Records for location {:}'.format(site_number))
+        printmes('No Records for location(s) {:}'.format(site_numbers))
     return readings
 
 
@@ -909,240 +931,10 @@ def fcl(df, dtObj):
 # -----------------------------------------------------------------------------------------------------------------------
 # Raw transducer import functions - these convert raw lev, xle, and csv files to Pandas Dataframes for processing
 
-def new_lev_imp(infile):
-    with open(infile, "r") as fd:
-        txt = fd.readlines()
-
-    try:
-        data_ind = txt.index('[Data]\n')
-        # inst_info_ind = txt.index('[Instrument info from data header]\n')
-        ch1_ind = txt.index('[CHANNEL 1 from data header]\n')
-        ch2_ind = txt.index('[CHANNEL 2 from data header]\n')
-        level = txt[ch1_ind + 1].split('=')[-1].strip().title()
-        level_units = txt[ch1_ind + 2].split('=')[-1].strip().lower()
-        temp = txt[ch2_ind + 1].split('=')[-1].strip().title()
-        temp_units = txt[ch2_ind + 2].split('=')[-1].strip().lower()
-        # serial_num = txt[inst_info_ind+1].split('=')[-1].strip().strip(".")
-        # inst_num = txt[inst_info_ind+2].split('=')[-1].strip()
-        # location = txt[inst_info_ind+3].split('=')[-1].strip()
-        # start_time = txt[inst_info_ind+6].split('=')[-1].strip()
-        # stop_time = txt[inst_info_ind+7].split('=')[-1].strip()
-
-        df = pd.read_table(infile, parse_dates=[[0, 1]], sep='\s+', skiprows=data_ind + 2,
-                           names=['Date', 'Time', level, temp],
-                           skipfooter=1, engine='python')
-        df.rename(columns={'Date_Time': 'DateTime'}, inplace=True)
-        df.set_index('DateTime', inplace=True)
-
-        if level_units == "feet" or level_units == "ft":
-            df[level] = pd.to_numeric(df[level])
-        elif level_units == "kpa":
-            df[level] = pd.to_numeric(df[level]) * 0.33456
-            printmes("Units in kpa, converting {:} to ft...".format(os.path.basename(infile)))
-        elif level_units == "mbar":
-            df[level] = pd.to_numeric(df[level]) * 0.0334552565551
-        elif level_units == "psi":
-            df[level] = pd.to_numeric(df[level]) * 2.306726
-            printmes("Units in psi, converting {:} to ft...".format(os.path.basename(infile)))
-        elif level_units == "m" or level_units == "meters":
-            df[level] = pd.to_numeric(df[level]) * 3.28084
-            printmes("Units in psi, converting {:} to ft...".format(os.path.basename(infile)))
-        else:
-            df[level] = pd.to_numeric(df[level])
-            printmes("Unknown units, no conversion")
-
-        if temp_units == 'Deg C' or temp_units == u'\N{DEGREE SIGN}' + u'C':
-            df[temp] = df[temp]
-        elif temp_units == 'Deg F' or temp_units == u'\N{DEGREE SIGN}' + u'F':
-            printmes('Temp in F, converting {:} to C...'.format(os.path.basename(infile)))
-            df[temp] = (df[temp] - 32.0) * 5.0 / 9.0
-        df['name'] = infile
-        return df
-    except ValueError:
-        printmes('File {:} has formatting issues'.format(infile))
 
 
-def new_xle_imp(infile):
-    """This function uses an exact file path to upload a xle transducer file.
 
-    Args:
-        infile (file):
-            complete file path to input file
-
-    Returns:
-        A Pandas DataFrame containing the transducer data
-    """
-    with io.open(infile, 'r', encoding="ISO-8859-1") as f:
-        contents = f.read()
-        tree = ET.fromstring(contents)
-
-    dfdata = []
-    for child in tree[5]:
-        dfdata.append([child[i].text for i in range(len(child))])
-    f = pd.DataFrame(dfdata, columns=[tree[5][0][i].tag for i in range(len(tree[5][0]))])
-
-    try:
-        ch1ID = tree[3][0].text.title()  # Level
-    except AttributeError:
-        ch1ID = "Level"
-
-    ch1Unit = tree[3][1].text.lower()
-
-    if ch1Unit == "feet" or ch1Unit == "ft":
-        f[str(ch1ID).title()] = pd.to_numeric(f['ch1'])
-    elif ch1Unit == "kpa":
-        f[str(ch1ID).title()] = pd.to_numeric(f['ch1']) * 0.33456
-        printmes("Units in kpa, converting {:} to ft...".format(os.path.basename(infile)))
-    elif ch1Unit == "mbar":
-        f[str(ch1ID).title()] = pd.to_numeric(f['ch1']) * 0.0334552565551
-    elif ch1Unit == "psi":
-        f[str(ch1ID).title()] = pd.to_numeric(f['ch1']) * 2.306726
-        printmes("Units in psi, converting {:} to ft...".format(os.path.basename(infile)))
-    elif ch1Unit == "m" or ch1Unit == "meters":
-        f[str(ch1ID).title()] = pd.to_numeric(f['ch1']) * 3.28084
-        printmes("Units in psi, converting {:} to ft...".format(os.path.basename(infile)))
-    else:
-        f[str(ch1ID).title()] = pd.to_numeric(f['ch1'])
-        print(ch1Unit)
-        printmes("Unknown units, no conversion")
-
-    if 'ch2' in f.columns:
-        try:
-            ch2ID = tree[4][0].text.title()  # Level
-        except AttributeError:
-            ch2ID = "Temperature"
-
-        ch2Unit = tree[4][1].text
-        numCh2 = pd.to_numeric(f['ch2'])
-
-        if ch2Unit == 'Deg C' or ch2Unit == 'Deg_C' or ch2Unit == u'\N{DEGREE SIGN}' + u'C':
-            f[str(ch2ID).title()] = numCh2
-        elif ch2Unit == 'Deg F' or ch2Unit == u'\N{DEGREE SIGN}' + u'F':
-            printmes('Temp in F, converting to C')
-            f[str(ch2ID).title()] = (numCh2 - 32) * 5 / 9
-        else:
-            printmes('Unknown temp Units')
-            f[str(ch2ID).title()] = numCh2
-    else:
-        print('No channel 2 for {:}'.format(infile))
-
-    if 'ch3' in f.columns:
-        ch3ID = tree[5][0].text.title()  # Level
-        ch3Unit = tree[5][1].text
-        f[str(ch3ID).title()] = pd.to_numeric(f['ch3'])
-
-    # add extension-free file name to dataframe
-    f['name'] = infile.split('\\').pop().split('/').pop().rsplit('.', 1)[0]
-    # combine Date and Time fields into one field
-    f['DateTime'] = pd.to_datetime(f.apply(lambda x: x['Date'] + ' ' + x['Time'], 1))
-    f[str(ch1ID).title()] = pd.to_numeric(f[str(ch1ID).title()])
-
-    f = f.reset_index()
-    f = f.set_index('DateTime')
-    f['Level'] = f[str(ch1ID).title()]
-
-    droplist = ['Date', 'Time', 'ch1', 'ch2', 'index', 'ms']
-    for item in droplist:
-        if item in f.columns:
-            f = f.drop(item, axis=1)
-
-    return f
-
-
-def new_csv_imp(infile):
-    """This function uses an exact file path to upload a csv transducer file.
-
-    Args:
-        infile (file):
-            complete file path to input file
-
-    Returns:
-        A Pandas DataFrame containing the transducer data
-    """
-    with open(infile, "r") as fd:
-        txt = fd.readlines()
-        if len(txt) > 1:
-            if 'Serial' in txt[0]:
-                print('{:} is Solinst'.format(infile))
-                if 'UNIT: ' in txt[7]:
-                    level_units = str(txt[7])[5:].strip().lower()
-                if 'UNIT: ' in txt[12]:
-                    temp_units = str(txt[12])[5:].strip().lower()
-                f = pd.read_csv(infile, skiprows=13, parse_dates=[[0, 1]], usecols=[0, 1, 3, 4])
-                print(f.columns)
-                f['DateTime'] = pd.to_datetime(f['Date_Time'], errors='coerce')
-                f.set_index('DateTime', inplace=True)
-                f.drop('Date_Time', axis=1, inplace=True)
-                f.rename(columns={'LEVEL': 'Level', 'TEMP': 'Temp'}, inplace=True)
-                level = 'Level'
-                temp = 'Temp'
-
-                if level_units == "feet" or level_units == "ft":
-                    f[level] = pd.to_numeric(f[level])
-                elif level_units == "kpa":
-                    f[level] = pd.to_numeric(f[level]) * 0.33456
-                    printmes("Units in kpa, converting {:} to ft...".format(os.path.basename(infile)))
-                elif level_units == "mbar":
-                    f[level] = pd.to_numeric(f[level]) * 0.0334552565551
-                elif level_units == "psi":
-                    f[level] = pd.to_numeric(f[level]) * 2.306726
-                    printmes("Units in psi, converting {:} to ft...".format(os.path.basename(infile)))
-                elif level_units == "m" or level_units == "meters":
-                    f[level] = pd.to_numeric(f[level]) * 3.28084
-                    printmes("Units in psi, converting {:} to ft...".format(os.path.basename(infile)))
-                else:
-                    f[level] = pd.to_numeric(f[level])
-                    printmes("Unknown units, no conversion")
-
-                if temp_units == 'Deg C' or temp_units == u'\N{DEGREE SIGN}' + u'C':
-                    f[temp] = f[temp]
-                elif temp_units == 'Deg F' or temp_units == u'\N{DEGREE SIGN}' + u'F':
-                    printmes('Temp in F, converting {:} to C...'.format(os.path.basename(infile)))
-                    f[temp] = (f[temp] - 32.0) * 5.0 / 9.0
-                return f
-
-            elif 'Date' in txt[1]:
-                print('{:} is Global'.format(infile))
-                f = pd.read_csv(infile, skiprows=1, parse_dates=[[0, 1]])
-                # f = f.reset_index()
-                f['DateTime'] = pd.to_datetime(f['Date_ Time'], errors='coerce')
-                f = f[f.DateTime.notnull()]
-                if ' Feet' in list(f.columns.values):
-                    f['Level'] = f[' Feet']
-                    f.drop([' Feet'], inplace=True, axis=1)
-                elif 'Feet' in list(f.columns.values):
-                    f['Level'] = f['Feet']
-                    f.drop(['Feet'], inplace=True, axis=1)
-                else:
-                    f['Level'] = f.iloc[:, 1]
-                # Remove first and/or last measurements if the transducer was out of the water
-                # f = dataendclean(f, 'Level')
-                flist = f.columns.tolist()
-                if ' Temp C' in flist:
-                    f['Temperature'] = f[' Temp C']
-                    f['Temp'] = f['Temperature']
-                    f.drop([' Temp C', 'Temperature'], inplace=True, axis=1)
-                elif ' Temp F' in flist:
-                    f['Temperature'] = (f[' Temp F'] - 32) * 5 / 9
-                    f['Temp'] = f['Temperature']
-                    f.drop([' Temp F', 'Temperature'], inplace=True, axis=1)
-                else:
-                    f['Temp'] = np.nan
-                f.set_index(['DateTime'], inplace=True)
-                f['date'] = f.index.to_julian_date().values
-                f['datediff'] = f['date'].diff()
-                f = f[f['datediff'] > 0]
-                f = f[f['datediff'] < 1]
-                # bse = int(pd.to_datetime(f.index).minute[0])
-                # f = hourly_resample(f, bse)
-                f.rename(columns={' Volts': 'Volts'}, inplace=True)
-                f.drop([u'date', u'datediff', u'Date_ Time'], inplace=True, axis=1)
-                return f
-        else:
-            print('{:} is unrecognized'.format(infile))
-
-
-def new_trans_imp(infile):
+class new_trans_imp(object):
     """This function uses an imports and cleans the ends of transducer file.
 
     Args:
@@ -1154,26 +946,263 @@ def new_trans_imp(infile):
     Returns:
         A Pandas DataFrame containing the transducer data
     """
-    file_ext = os.path.splitext(infile)[1]
-    try:
-        if file_ext == '.xle':
-            well = new_xle_imp(infile)
-            well = dataendclean(well, 'Level')
-        elif file_ext == '.lev':
-            well = new_lev_imp(infile)
-            well = dataendclean(well, 'Level')
-        elif file_ext == '.csv':
-            well = new_csv_imp(infile)
-            well = dataendclean(well, 'Level')
-        else:
-            printmes('filetype not recognized')
-            well = None
-            pass
-        return well
-    except AttributeError:
-        printmes('Bad File')
-        return
+    def __init__(self, infile, trim_end=True):
+        self.well = None
+        self.infile = infile
+        file_ext = os.path.splitext(self.infile)[1]
+        try:
+            if file_ext == '.xle':
+                self.well = self.new_xle_imp()
+            elif file_ext == '.lev':
+                self.well = self.new_lev_imp()
+            elif file_ext == '.csv':
+                self.well = self.new_csv_imp()
+            else:
+                printmes('filetype not recognized')
+                self.well = None
 
+            if self.well is None:
+                pass
+            elif trim_end:
+                self.well = dataendclean(self.well, 'Level')
+            else:
+                pass
+            return
+
+        except AttributeError:
+            printmes('Bad File')
+            return
+
+    def new_csv_imp(self):
+        """This function uses an exact file path to upload a csv transducer file.
+
+        Args:
+            infile (file):
+                complete file path to input file
+
+        Returns:
+            A Pandas DataFrame containing the transducer data
+        """
+        with open(self.infile, "r") as fd:
+            txt = fd.readlines()
+            if len(txt) > 1:
+                if 'Serial' in txt[0]:
+                    print('{:} is Solinst'.format(self.infile))
+                    if 'UNIT: ' in txt[7]:
+                        level_units = str(txt[7])[5:].strip().lower()
+                    if 'UNIT: ' in txt[12]:
+                        temp_units = str(txt[12])[5:].strip().lower()
+                    f = pd.read_csv(self.infile, skiprows=13, parse_dates=[[0, 1]], usecols=[0, 1, 3, 4])
+                    print(f.columns)
+                    f['DateTime'] = pd.to_datetime(f['Date_Time'], errors='coerce')
+                    f.set_index('DateTime', inplace=True)
+                    f.drop('Date_Time', axis=1, inplace=True)
+                    f.rename(columns={'LEVEL': 'Level', 'TEMP': 'Temp'}, inplace=True)
+                    level = 'Level'
+                    temp = 'Temp'
+
+                    if level_units == "feet" or level_units == "ft":
+                        f[level] = pd.to_numeric(f[level])
+                    elif level_units == "kpa":
+                        f[level] = pd.to_numeric(f[level]) * 0.33456
+                        printmes("Units in kpa, converting {:} to ft...".format(os.path.basename(self.infile)))
+                    elif level_units == "mbar":
+                        f[level] = pd.to_numeric(f[level]) * 0.0334552565551
+                    elif level_units == "psi":
+                        f[level] = pd.to_numeric(f[level]) * 2.306726
+                        printmes("Units in psi, converting {:} to ft...".format(os.path.basename(self.infile)))
+                    elif level_units == "m" or level_units == "meters":
+                        f[level] = pd.to_numeric(f[level]) * 3.28084
+                        printmes("Units in psi, converting {:} to ft...".format(os.path.basename(self.infile)))
+                    else:
+                        f[level] = pd.to_numeric(f[level])
+                        printmes("Unknown units, no conversion")
+
+                    if temp_units == 'Deg C' or temp_units == u'\N{DEGREE SIGN}' + u'C':
+                        f[temp] = f[temp]
+                    elif temp_units == 'Deg F' or temp_units == u'\N{DEGREE SIGN}' + u'F':
+                        printmes('Temp in F, converting {:} to C...'.format(os.path.basename(self.infile)))
+                        f[temp] = (f[temp] - 32.0) * 5.0 / 9.0
+                    return f
+
+                elif 'Date' in txt[1]:
+                    print('{:} is Global'.format(self.infile))
+                    f = pd.read_csv(self.infile, skiprows=1, parse_dates=[[0, 1]])
+                    # f = f.reset_index()
+                    f['DateTime'] = pd.to_datetime(f['Date_ Time'], errors='coerce')
+                    f = f[f.DateTime.notnull()]
+                    if ' Feet' in list(f.columns.values):
+                        f['Level'] = f[' Feet']
+                        f.drop([' Feet'], inplace=True, axis=1)
+                    elif 'Feet' in list(f.columns.values):
+                        f['Level'] = f['Feet']
+                        f.drop(['Feet'], inplace=True, axis=1)
+                    else:
+                        f['Level'] = f.iloc[:, 1]
+                    # Remove first and/or last measurements if the transducer was out of the water
+                    # f = dataendclean(f, 'Level')
+                    flist = f.columns.tolist()
+                    if ' Temp C' in flist:
+                        f['Temperature'] = f[' Temp C']
+                        f['Temp'] = f['Temperature']
+                        f.drop([' Temp C', 'Temperature'], inplace=True, axis=1)
+                    elif ' Temp F' in flist:
+                        f['Temperature'] = (f[' Temp F'] - 32) * 5 / 9
+                        f['Temp'] = f['Temperature']
+                        f.drop([' Temp F', 'Temperature'], inplace=True, axis=1)
+                    else:
+                        f['Temp'] = np.nan
+                    f.set_index(['DateTime'], inplace=True)
+                    f['date'] = f.index.to_julian_date().values
+                    f['datediff'] = f['date'].diff()
+                    f = f[f['datediff'] > 0]
+                    f = f[f['datediff'] < 1]
+                    # bse = int(pd.to_datetime(f.index).minute[0])
+                    # f = hourly_resample(f, bse)
+                    f.rename(columns={' Volts': 'Volts'}, inplace=True)
+                    f.drop([u'date', u'datediff', u'Date_ Time'], inplace=True, axis=1)
+                    return f
+            else:
+                print('{:} is unrecognized'.format(self.infile))
+
+    def new_lev_imp(self):
+        with open(self.infile, "r") as fd:
+            txt = fd.readlines()
+
+        try:
+            data_ind = txt.index('[Data]\n')
+            # inst_info_ind = txt.index('[Instrument info from data header]\n')
+            ch1_ind = txt.index('[CHANNEL 1 from data header]\n')
+            ch2_ind = txt.index('[CHANNEL 2 from data header]\n')
+            level = txt[ch1_ind + 1].split('=')[-1].strip().title()
+            level_units = txt[ch1_ind + 2].split('=')[-1].strip().lower()
+            temp = txt[ch2_ind + 1].split('=')[-1].strip().title()
+            temp_units = txt[ch2_ind + 2].split('=')[-1].strip().lower()
+            # serial_num = txt[inst_info_ind+1].split('=')[-1].strip().strip(".")
+            # inst_num = txt[inst_info_ind+2].split('=')[-1].strip()
+            # location = txt[inst_info_ind+3].split('=')[-1].strip()
+            # start_time = txt[inst_info_ind+6].split('=')[-1].strip()
+            # stop_time = txt[inst_info_ind+7].split('=')[-1].strip()
+
+            df = pd.read_table(self.infile, parse_dates=[[0, 1]], sep='\s+', skiprows=data_ind + 2,
+                               names=['Date', 'Time', level, temp],
+                               skipfooter=1, engine='python')
+            df.rename(columns={'Date_Time': 'DateTime'}, inplace=True)
+            df.set_index('DateTime', inplace=True)
+
+            if level_units == "feet" or level_units == "ft":
+                df[level] = pd.to_numeric(df[level])
+            elif level_units == "kpa":
+                df[level] = pd.to_numeric(df[level]) * 0.33456
+                printmes("Units in kpa, converting {:} to ft...".format(os.path.basename(self.infile)))
+            elif level_units == "mbar":
+                df[level] = pd.to_numeric(df[level]) * 0.0334552565551
+            elif level_units == "psi":
+                df[level] = pd.to_numeric(df[level]) * 2.306726
+                printmes("Units in psi, converting {:} to ft...".format(os.path.basename(self.infile)))
+            elif level_units == "m" or level_units == "meters":
+                df[level] = pd.to_numeric(df[level]) * 3.28084
+                printmes("Units in psi, converting {:} to ft...".format(os.path.basename(self.infile)))
+            else:
+                df[level] = pd.to_numeric(df[level])
+                printmes("Unknown units, no conversion")
+
+            if temp_units == 'Deg C' or temp_units == u'\N{DEGREE SIGN}' + u'C':
+                df[temp] = df[temp]
+            elif temp_units == 'Deg F' or temp_units == u'\N{DEGREE SIGN}' + u'F':
+                printmes('Temp in F, converting {:} to C...'.format(os.path.basename(self.infile)))
+                df[temp] = (df[temp] - 32.0) * 5.0 / 9.0
+            df['name'] = self.infile
+            return df
+        except ValueError:
+            printmes('File {:} has formatting issues'.format(self.infile))
+
+
+    def new_xle_imp(self):
+        """This function uses an exact file path to upload a xle transducer file.
+
+        Args:
+            infile (file):
+                complete file path to input file
+
+        Returns:
+            A Pandas DataFrame containing the transducer data
+        """
+        with io.open(self.infile, 'r', encoding="ISO-8859-1") as f:
+            contents = f.read()
+            tree = ET.fromstring(contents)
+
+        dfdata = []
+        for child in tree[5]:
+            dfdata.append([child[i].text for i in range(len(child))])
+        f = pd.DataFrame(dfdata, columns=[tree[5][0][i].tag for i in range(len(tree[5][0]))])
+
+        try:
+            ch1ID = tree[3][0].text.title()  # Level
+        except AttributeError:
+            ch1ID = "Level"
+
+        ch1Unit = tree[3][1].text.lower()
+
+        if ch1Unit == "feet" or ch1Unit == "ft":
+            f[str(ch1ID).title()] = pd.to_numeric(f['ch1'])
+        elif ch1Unit == "kpa":
+            f[str(ch1ID).title()] = pd.to_numeric(f['ch1']) * 0.33456
+            printmes("Units in kpa, converting {:} to ft...".format(os.path.basename(self.infile)))
+        elif ch1Unit == "mbar":
+            f[str(ch1ID).title()] = pd.to_numeric(f['ch1']) * 0.0334552565551
+        elif ch1Unit == "psi":
+            f[str(ch1ID).title()] = pd.to_numeric(f['ch1']) * 2.306726
+            printmes("Units in psi, converting {:} to ft...".format(os.path.basename(self.infile)))
+        elif ch1Unit == "m" or ch1Unit == "meters":
+            f[str(ch1ID).title()] = pd.to_numeric(f['ch1']) * 3.28084
+            printmes("Units in psi, converting {:} to ft...".format(os.path.basename(self.infile)))
+        else:
+            f[str(ch1ID).title()] = pd.to_numeric(f['ch1'])
+            print(ch1Unit)
+            printmes("Unknown units, no conversion")
+
+        if 'ch2' in f.columns:
+            try:
+                ch2ID = tree[4][0].text.title()  # Level
+            except AttributeError:
+                ch2ID = "Temperature"
+
+            ch2Unit = tree[4][1].text
+            numCh2 = pd.to_numeric(f['ch2'])
+
+            if ch2Unit == 'Deg C' or ch2Unit == 'Deg_C' or ch2Unit == u'\N{DEGREE SIGN}' + u'C':
+                f[str(ch2ID).title()] = numCh2
+            elif ch2Unit == 'Deg F' or ch2Unit == u'\N{DEGREE SIGN}' + u'F':
+                printmes('Temp in F, converting to C')
+                f[str(ch2ID).title()] = (numCh2 - 32) * 5 / 9
+            else:
+                printmes('Unknown temp Units')
+                f[str(ch2ID).title()] = numCh2
+        else:
+            print('No channel 2 for {:}'.format(self.infile))
+
+        if 'ch3' in f.columns:
+            ch3ID = tree[5][0].text.title()  # Level
+            ch3Unit = tree[5][1].text
+            f[str(ch3ID).title()] = pd.to_numeric(f['ch3'])
+
+        # add extension-free file name to dataframe
+        f['name'] = self.infile.split('\\').pop().split('/').pop().rsplit('.', 1)[0]
+        # combine Date and Time fields into one field
+        f['DateTime'] = pd.to_datetime(f.apply(lambda x: x['Date'] + ' ' + x['Time'], 1))
+        f[str(ch1ID).title()] = pd.to_numeric(f[str(ch1ID).title()])
+
+        f = f.reset_index()
+        f = f.set_index('DateTime')
+        f['Level'] = f[str(ch1ID).title()]
+
+        droplist = ['Date', 'Time', 'ch1', 'ch2', 'index', 'ms']
+        for item in droplist:
+            if item in f.columns:
+                f = f.drop(item, axis=1)
+
+        return f
 
 # -----------------------------------------------------------------------------------------------------------------------
 # Summary scripts - these extract transducer headers and summarize them in tables
@@ -1267,7 +1296,7 @@ def csv_info_table(folder):
         if filetype == 'csv':
             try:
                 cfile = {}
-                csv[basename] = new_csv_imp(os.path.join(folder, file))
+                csv[basename] = new_trans_imp(os.path.join(folder, file))
                 cfile['Battery_level'] = int(round(csv[basename].loc[csv[basename]. \
                                                    index[-1], 'Volts'] / csv[basename]. \
                                                    loc[csv[basename].index[0], 'Volts'] * 100, 0))
@@ -1338,7 +1367,7 @@ class baroimport(object):
             sitename = self.filedict[self.well_files[b]]
             altid = self.idget[sitename]
             printmes([b, altid, sitename])
-            df[altid] = new_trans_imp(self.xledir + self.well_files[b])
+            df[altid] = new_trans_imp(self.xledir + self.well_files[b]).well
             printmes("Importing {:} ({:})".format(sitename, altid))
 
             if self.to_import:
@@ -1388,15 +1417,18 @@ class baroimport(object):
                 pdf_pages.savefig(fig)
                 plt.close()
 
-            h = pd.read_csv(self.baro_comp_file, index_col=0, header=0, parse_dates=True)
-            g = pd.concat([h, df[altid]])
+            """"if os.path.isfile(self.baro_comp_file) and os.access(os.path.dirname(self.baro_comp_file), os.R_OK):
+                h = pd.read_csv(self.baro_comp_file, index_col=0, header=0, parse_dates=True)
+                g = pd.concat([h, df[altid]])
+                os.remove(self.baro_comp_file)
+            else:
+                g = df[altid]
             # remove duplicates based on index then sort by index
             g['ind'] = g.index
             g.drop_duplicates(subset='ind', inplace=True)
             g.drop('ind', axis=1, inplace=True)
             g = g.sort_index()
-            os.remove(self.baro_comp_file)
-            g.to_csv(self.baro_comp_file)
+            g.to_csv(self.baro_comp_file)"""
 
         if self.should_plot:
             pdf_pages.close()
@@ -1421,6 +1453,7 @@ class wellimport(object):
         self.well_files = None
         self.wellname = None
         self.welldict = None
+        self.quer = None
         self.filedict = None
         self.man_file = None
         self.save_location = None
@@ -1433,10 +1466,10 @@ class wellimport(object):
         self.baro_comp_file = None
         self.to_import = None
         self.idget = None
-        self.sampint = None
+        self.sampint = 60
 
     def read_xle(self):
-        well = new_xle_imp(self.well_file)
+        well = new_trans_imp(self.well_file)
         well.to_csv(self.save_location)
         return
 
@@ -1499,7 +1532,7 @@ class wellimport(object):
         baro = new_trans_imp(self.baro_file)
 
         df = well_baro_merge(well, baro, barocolumn='Level', wellcolumn='Level', outcolumn='corrwl', vented=False,
-                             sampint=60)
+                             sampint=self.sampint)
 
         df.to_csv(self.save_location)
 
@@ -1520,6 +1553,9 @@ class wellimport(object):
         drift = round(float(dft[1]['drift'].values[0]), 3)
 
         printmes("Drift is {:} feet".format(drift))
+
+
+
         dft[0].to_csv(self.save_location)
 
         if self.should_plot:
@@ -1565,11 +1601,12 @@ class wellimport(object):
     def many_wells(self):
         """Used by the MultTransducerImport tool to import multiple wells into the SDE"""
         arcpy.env.workspace = self.sde_conn
+        conn_file_root = self.sde_conn
         loc_table = "UGGP.UGGPADMIN.UGS_NGWMN_Monitoring_Locations"
 
         # create empty dataframe to house well data
-        field_names = ['LocationID', 'LocationName', 'LocationType', 'LocationDesc', 'AltLocationID', 'Altitude',
-                       'AltitudeUnits', 'WellDepth', 'SiteID', 'Offset', 'LoggerType', 'BaroEfficiency',
+        field_names = ['LocationID', 'LocationName', 'LocationType', 'LocationDesc', 'AltLocationID', 'VerticalMeasure',
+                       'VerticalUnit', 'WellDepth', 'SiteID', 'Offset', 'LoggerType', 'BaroEfficiency',
                        'BaroEfficiencyStart', 'BaroLoggerType']
         df = pd.DataFrame(columns=field_names)
         # populate dataframe with data from SDE well table
@@ -1623,15 +1660,13 @@ class wellimport(object):
         lastdate = None
 
         if len(baros) < 1:
-            baros = [9024, 9025, 9027, 9049, 9061, 9003]
-            for baro in baros:
-                try:
-                    baro_out[str(baro)] = get_location_data(baro, self.sde_conn, first_date=mintime,
+            baros = [9024, 9025, 9027, 9049, 9061, 9003, 9062]
+
+            baro_out = get_location_data(baros, self.sde_conn, first_date=mintime,
                                                             last_date=lastdate)
-                    printmes('Barometer {:} data download success'.format(baro))
-                except:
-                    printmes('Barometer {:} Data not available'.format(baro))
-                    pass
+            baro_out.rename(columns={'READINGDATE': 'DateTime', 'MEASUREDLEVEL': 'Level'}, inplace=True)
+            baro_out.set_index(['LOCATIONID', 'DateTime'], inplace=True)
+            printmes('Barometer data download success')
 
         else:
             for b in range(len(baros)):
@@ -1643,7 +1678,10 @@ class wellimport(object):
                 printmes('Barometer {:} ({:}) Imported'.format(barline['LocationName'], baros.index[b]))
 
         # upload manual data from csv file
-        manl = pd.read_csv(self.man_file, index_col="DateTime")
+        if os.path.splitext(self.man_file)[-1] == '.csv':
+            manl = pd.read_csv(self.man_file, index_col="READINGDATE")
+        else:
+            manl = pd.read_excel(self.man_file, index_col="READINGDATE")
 
         if self.should_plot:
             pdf_pages = PdfPages(self.chart_out)
@@ -1655,7 +1693,8 @@ class wellimport(object):
             printmes("Importing {:} ({:})".format(well_line['LocationName'], wells.index[i]))
 
             df, man, be, drift = simp_imp_well(well_table, well_line['full_filepath'], baro_out, wells.index[i],
-                                               manl, stbl_elev=self.stbl, drift_tol=float(self.tol), override=self.ovrd)
+                                               manl, stbl_elev=self.stbl, drift_tol=float(self.tol),
+                                               conn_file_root=conn_file_root,override=self.ovrd)
             printmes(arcpy.GetMessages())
             printmes('Drift for well {:} is {:}.'.format(well_line['LocationName'], drift))
             printmes("Well {:} complete.\n---------------".format(well_line['LocationName']))
@@ -1710,6 +1749,45 @@ class wellimport(object):
 
         return
 
+    def find_gaps(self):
+        enviro = self.sde_conn
+        first_date = self.man_startdate
+        last_date = self.man_enddate
+        save_local= self.save_location
+        quer = self.quer
+        if first_date == '':
+            first_date = None
+        if last_date == '':
+            last_date = None
+
+        if quer == 'all stations':
+            where_clause = None
+        elif quer == 'wetland_piezometers':
+            where_clause = "WLNetworkName IN('Snake Valley Wetlands','Mills-Mona Wetlands')"
+        elif quer == 'snake valley wells':
+            where_clause = "WLNetworkName IN('Snake Valley')"
+        elif quer == 'hazards':
+            where_clause = 'Hazards'
+        else:
+            where_clause = None
+
+        loc_table = "UGGP.UGGPADMIN.UGS_NGWMN_Monitoring_Locations"
+        loc_ids = [str(row[0]) for row in arcpy.da.SearchCursor(loc_table, 'AltLocationID',where_clause)]
+        gapdct = {}
+
+        for site_number in loc_ids:
+            printmes(site_number)
+            try:
+                gapdct[site_number] = get_gap_data(int(site_number), enviro, gap_tol=0.5, first_date=first_date, last_date=last_date,
+                             gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading")
+            except AttributeError:
+                printmes("Error with {:}".format(site_number))
+        gapdata = pd.concat(gapdct)
+
+        gapdata.rename_axis(['LocationId', 'Datetime'], inplace=True)
+        gapdata.to_csv(save_local)
+
+
 
 # ---------------ArcGIS Python Toolbox Classes and Functions-------------------------------------------------------------
 
@@ -1738,7 +1816,7 @@ class Toolbox(object):
 
         # List of tool classes associated with this toolbox
         self.tools = [SingleTransducerImport, MultBarometerImport, MultTransducerImport, SimpleBaroFix,
-                      SimpleBaroDriftFix, XLERead]
+                      SimpleBaroDriftFix, XLERead, GapData]
 
 
 class SingleTransducerImport(object):
@@ -1827,8 +1905,8 @@ class MultBarometerImport(object):
             parameter("Barometer File Matches", "well_files", 'GPValueTable'),
             parameter("Import data into SDE?", "to_import", "GPBoolean",
                       parameterType="Optional", defaultValue=0),
-            parameter("Barometer Compilation csv location", "baro_comp_file", "DEFile",
-                      direction="Output"),
+            #parameter("Barometer Compilation csv location", "baro_comp_file", "DEFile",
+            #          direction="Output"),
             parameter("Override date filter? (warning: can cause duplicate data.", "ovrd", "GPBoolean",
                       parameterType="Optional", defaultValue=0),
             parameter("Create a Chart?", "should_plot", "GPBoolean", parameterType="Optional"),
@@ -1921,11 +1999,11 @@ class MultBarometerImport(object):
             wellimp.filedict = dict(zip(wellimp.well_files, wellimp.wellname))
             wellimp.idget = dict(zip(wellimp.wellname, wellimp.wellid))
         wellimp.to_import = parameters[3]
-        wellimp.baro_comp_file = parameters[4].value
-        wellimp.ovrd = parameters[5].value
-        wellimp.should_plot = parameters[6].value
-        wellimp.chart_out = parameters[7].valueAsText
-        wellimp.toexcel = parameters[8].value
+        #wellimp.baro_comp_file = parameters[4].value
+        wellimp.ovrd = parameters[4].value
+        wellimp.should_plot = parameters[5].value
+        wellimp.chart_out = parameters[6].valueAsText
+        wellimp.toexcel = parameters[7].value
         printmes("Processing")
         wellimp.many_baros()
         printmes(arcpy.GetMessages())
@@ -2099,7 +2177,7 @@ class SimpleBaroDriftFix(object):
         ]
         self.parameters[0].filter.list = ['csv', 'xle']
         self.parameters[1].filter.list = ['csv', 'xle']
-        self.parameters[6].defaultEnvironmentName = 60
+        self.parameters[6].value = 60
         self.parameters[7].filter.list = ['csv']
         # self.parameters[8].filter.list = ['pdf']
 
@@ -2174,3 +2252,50 @@ class XLERead(object):
         wellimp.well_file = parameters[0].valueAsText
         wellimp.save_location = parameters[1].valueAsText
         printmes(arcpy.GetMessages())
+
+class GapData(object):
+    def __init__(self):
+        self.label = "Find gaps in time series in an SDE database"
+        self.description = """Reads SDE time series data and returns csv with information on gaps. """
+        self.canRunInBackground = False
+        self.parameters = [
+            parameter("Input SDE Connection", "sde_conn", "DEWorkspace",
+                      defaultValue="C:/Users/{:}/AppData/Roaming/ESRI/Desktop10.5/ArcCatalog/UGS_SDE.sde".format(
+                          os.environ.get('USERNAME'))),
+            parameter("Station Search","searchtype","GPString"),
+            parameter("Begin Date", "man_startdate", "Date", parameterType = "Optional"),
+            parameter("End Date", "man_enddate", "Date", parameterType="Optional"),
+            parameter("Output File", "save_location", "DEFile", direction="Output")
+        ]
+
+        self.parameters[1].filter.list = ['all stations','wetland piezometers','snake valley wells','hazards']
+
+    def getParameterInfo(self):
+        """Define parameter definitions; http://joelmccune.com/lessons-learned-and-ideas-for-python-toolbox-coding/"""
+        return self.parameters
+
+    def isLicensed(self):
+        """Set whether tool is licensed to execute."""
+        return True
+
+    def updateParameters(self, parameters):
+        """Modify the values and properties of parameters before internal
+        validation is performed.  This method is called whenever a parameter"""
+
+        return
+
+    def updateMessages(self, parameters):
+        """Modify the messages created by internal validation for each tool
+        parameter.  This method is called after internal validation."""
+        return
+
+    def execute(self, parameters, messages):
+        wellimp = wellimport()
+        wellimp.sde_conn = parameters[0].valueAsText
+        wellimp.quer = parameters[1].valueAsText
+        wellimp.man_startdate= parameters[2].valueAsText
+        wellimp.man_enddate= parameters[3].valueAsText
+        wellimp.save_location= parameters[4].valueAsText
+        wellimp.find_gaps()
+        printmes(arcpy.GetMessages())
+
