@@ -152,7 +152,7 @@ def fix_drift(well, manualfile, meas='Level', corrwl='corrwl', manmeas='Measured
             # apply linear drift to transducer data to fix drift; flipped x to match drift
             df.loc[:, 'DRIFTCORRECTION'] = df['datechange'].apply(lambda x: new_slope * x, 1)
             df.loc[:, outcolname] = df[meas] - (df['DRIFTCORRECTION'] + b)
-
+            df.sort_index(inplace=True)
             drift_features[i] = {'t_beg': breakpoints[i], 'man_beg': first_man.name, 't_end': breakpoints[i + 1],
                                  'man_end': last_man.name, 'slope_man': slope_man, 'slope_trans': slope_trans,
                                  'intercept': b, 'slope': m, 'new_slope': new_slope,
@@ -184,9 +184,11 @@ class WaterElevation(object):
             arcpy.env.workspace = self.conn_file_root
             welltable = "UGGP.UGGPADMIN.UGS_NGWMN_Monitoring_Locations"
             self.well_table = table_to_pandas_dataframe(welltable, query="AltLocationID is not Null")
+            well_table.set_index('AltLocationID', inplace=True)
         else:
             self.well_table = well_table
-        self.stdata = self.well_table[self.well_table['AltLocationID'] == int(self.site_number)]
+
+        self.stdata = self.well_table[self.well_table.index == int(self.site_number)]
         self.well_elev = float(self.stdata['VerticalMeasure'].values[0])
         self.stickup = 0
         return
@@ -336,7 +338,7 @@ def imp_one_well(well_file, baro_file, man_startdate, man_start_level, man_endat
 
 
 def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_root, stbl_elev=True, be=None,
-                  gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading", drift_tol=0.3, override=False):
+                  gw_reading_table="UGGP.UGGPADMIN.UGS_GW_reading", drift_tol=0.3, jumptol=1.0, override=False):
     """
     Imports single well
     :param well_table: pandas dataframe of well data with ALternateID as index; needs altitude, be, stickup, and barolooger
@@ -352,9 +354,9 @@ def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_roo
     """
 
     # import well file
-    well = new_trans_imp(well_file)
+    well = new_trans_imp(well_file, jumptol=jumptol).well
     wtr_elevs = WaterElevation(wellid, well_table = well_table, conn_file_root=conn_file_root)
-    man = wtr_elevs.get_gw_elevs(manual, stbl_elev=stbl_elev)
+    man = wtr_elevs.get_gw_elevs(manual, stable_elev=stbl_elev)
 
     try:
         baroid = wtr_elevs.well_table.loc[wellid, 'BaroLoggerType']
@@ -563,10 +565,12 @@ def get_location_data(site_numbers, enviro, first_date=None, last_date=None, lim
     printmes(query)
     sql_sn = (limit, 'ORDER BY READINGDATE ASC')
 
-    fieldnames = get_field_names(gw_reading_table)
-
+    #fieldnames = get_field_names(gw_reading_table)
+    fieldnames = ['READINGDATE','MEASUREDLEVEL','LOCATIONID']
     readings = table_to_pandas_dataframe(gw_reading_table, fieldnames, query, sql_sn)
-    readings.set_index('READINGDATE', inplace=True)
+    #readings.set_index('READINGDATE', inplace=True)
+    #baro.rename(columns={'READINGDATE': 'DateTime', 'MEASUREDLEVEL': 'Level'}, inplace=True)
+    readings.set_index(['LOCATIONID', 'READINGDATE'], inplace=True)
     if len(readings) == 0:
         printmes('No Records for location(s) {:}'.format(site_numbers))
     return readings
@@ -671,7 +675,7 @@ def edit_table(df, gw_reading_table, fieldnames):
 # -----------------------------------------------------------------------------------------------------------------------
 # These scripts remove outlier data and filter the time series of jumps and erratic measurements
 
-def dataendclean(df, x, inplace=False):
+def dataendclean(df, x, inplace=False, jumptol = 1.0):
     """Trims off ends and beginnings of datasets that exceed 2.0 standard deviations of the first and last 30 values
 
     :param df: Pandas DataFrame
@@ -692,7 +696,7 @@ def dataendclean(df, x, inplace=False):
     else:
         df = df.copy()
 
-    jump = df[abs(df.loc[:, x].diff()) > 1.0]
+    jump = df[abs(df.loc[:, x].diff()) > jumptol]
     try:
         for i in range(len(jump)):
             if jump.index[i] < df.index[50]:
@@ -946,7 +950,7 @@ class new_trans_imp(object):
     Returns:
         A Pandas DataFrame containing the transducer data
     """
-    def __init__(self, infile, trim_end=True):
+    def __init__(self, infile, trim_end=True, jumptol=1.0):
         self.well = None
         self.infile = infile
         file_ext = os.path.splitext(self.infile)[1]
@@ -964,7 +968,7 @@ class new_trans_imp(object):
             if self.well is None:
                 pass
             elif trim_end:
-                self.well = dataendclean(self.well, 'Level')
+                self.well = dataendclean(self.well, 'Level', jumptol=jumptol)
             else:
                 pass
             return
@@ -1275,6 +1279,7 @@ def xle_head_table(folder):
         for child in tree[2]:
             df1[child.tag] = child.text
 
+        df1['last_reading_date'] = tree[-1][-1][0].text
         df[basename[:-4]] = df1
     allwells = pd.DataFrame(df).T
     allwells.index.name = 'filename'
@@ -1306,6 +1311,7 @@ def csv_info_table(folder):
                 cfile['full_filepath'] = os.path.join(folder, file)
                 cfile['Start_time'] = csv[basename].first_valid_index()
                 cfile['Stop_time'] = csv[basename].last_valid_index()
+                cfile['last_reading_date'] = csv[basename].last_valid_index()
                 cfile['Location'] = ' '.join(basename.split(' ')[:-1])
                 cfile['trans type'] = 'Global Water'
                 df = df.append(cfile, ignore_index=True)
@@ -1467,9 +1473,10 @@ class wellimport(object):
         self.to_import = None
         self.idget = None
         self.sampint = 60
+        self.jumptol = 1.0
 
     def read_xle(self):
-        well = new_trans_imp(self.well_file)
+        well = new_trans_imp(self.well_file).well
         well.to_csv(self.save_location)
         return
 
@@ -1528,8 +1535,8 @@ class wellimport(object):
 
     def remove_bp(self):
 
-        well = new_trans_imp(self.well_file)
-        baro = new_trans_imp(self.baro_file)
+        well = new_trans_imp(self.well_file).well
+        baro = new_trans_imp(self.baro_file).well
 
         df = well_baro_merge(well, baro, barocolumn='Level', wellcolumn='Level', outcolumn='corrwl', vented=False,
                              sampint=self.sampint)
@@ -1538,8 +1545,8 @@ class wellimport(object):
 
     def remove_bp_drift(self):
 
-        well = new_trans_imp(self.well_file)
-        baro = new_trans_imp(self.baro_file)
+        well = new_trans_imp(self.well_file).well
+        baro = new_trans_imp(self.baro_file).well
 
         corrwl = well_baro_merge(well, baro, barocolumn='Level', wellcolumn='Level', outcolumn='corrwl',
                                  vented=False,
@@ -1602,6 +1609,7 @@ class wellimport(object):
         """Used by the MultTransducerImport tool to import multiple wells into the SDE"""
         arcpy.env.workspace = self.sde_conn
         conn_file_root = self.sde_conn
+        jumptol = self.jumptol
         loc_table = "UGGP.UGGPADMIN.UGS_NGWMN_Monitoring_Locations"
 
         # create empty dataframe to house well data
@@ -1648,8 +1656,8 @@ class wellimport(object):
         well_table.dropna(subset=['WellName'], inplace=True)
         well_table.to_csv(self.xledir + '/file_info_table.csv')
         printmes("Header Table with well information created at {:}/file_info_table.csv".format(self.xledir))
-        maxtime = max(pd.to_datetime(well_table['Stop_time']))
-        mintime = min(pd.to_datetime(well_table['Start_time']))
+        maxtime = max(pd.to_datetime(well_table['last_reading_date'])) + pd.DateOffset(days=2)
+        mintime = min(pd.to_datetime(well_table['Start_time'])) - pd.DateOffset(days=2)
         printmes("Data span from {:} to {:}.".format(mintime, maxtime))
 
         # upload barometric pressure data
@@ -1657,21 +1665,22 @@ class wellimport(object):
         baros = well_table[well_table['LocationType'] == 'Barometer']
 
         # lastdate = maxtime + datetime.timedelta(days=1)
-        lastdate = None
+        if maxtime > datetime.datetime.today():
+            lastdate = None
+        else:
+            lastdate = maxtime
 
         if len(baros) < 1:
             baros = [9024, 9025, 9027, 9049, 9061, 9003, 9062]
 
-            baro_out = get_location_data(baros, self.sde_conn, first_date=mintime,
-                                                            last_date=lastdate)
-            baro_out.rename(columns={'READINGDATE': 'DateTime', 'MEASUREDLEVEL': 'Level'}, inplace=True)
-            baro_out.set_index(['LOCATIONID', 'DateTime'], inplace=True)
+            baro_out = get_location_data(baros, self.sde_conn, first_date=mintime, last_date=lastdate)
+
             printmes('Barometer data download success')
 
         else:
             for b in range(len(baros)):
                 barline = baros.iloc[b, :]
-                df = new_trans_imp(barline['full_filepath'])
+                df = new_trans_imp(barline['full_filepath']).well
                 upload_bp_data(df, baros.index[b])
                 baro_out[baros.index[b]] = get_location_data(baros.index[b], self.sde_conn, first_date=mintime,
                                                              last_date=lastdate)
@@ -1693,7 +1702,7 @@ class wellimport(object):
             printmes("Importing {:} ({:})".format(well_line['LocationName'], wells.index[i]))
 
             df, man, be, drift = simp_imp_well(well_table, well_line['full_filepath'], baro_out, wells.index[i],
-                                               manl, stbl_elev=self.stbl, drift_tol=float(self.tol),
+                                               manl, stbl_elev=self.stbl, drift_tol=float(self.tol),jumptol=jumptol,
                                                conn_file_root=conn_file_root,override=self.ovrd)
             printmes(arcpy.GetMessages())
             printmes('Drift for well {:} is {:}.'.format(well_line['LocationName'], drift))
@@ -1724,7 +1733,7 @@ class wellimport(object):
                 x2 = df.index.values
 
                 x4 = man.index
-                y4 = man['Meas_GW_Elev']
+                y4 = man['WATERELEVATION']
                 fig, ax1 = plt.subplots()
                 ax1.scatter(x4, y4, color='purple')
                 ax1.plot(x1, y1, color='blue', label='Water Level Elevation')
@@ -2024,6 +2033,7 @@ class MultTransducerImport(object):
             parameter("Manual File Location", "man_file", "DEFile"),
             parameter("Constant Stickup?", "isstbl", "GPBoolean", defaultValue=1),
             parameter("Transducer Drift Tolerance (ft)", "tol", "GPDouble", defaultValue=0.3),
+            parameter("Beginning Jump Tolerance (ft)", "jumptol", "GPDouble", defaultValue=1.0)
             parameter("Override date filter? (warning: can cause duplicate data.", "ovrd", "GPBoolean",
                       parameterType="Optional", defaultValue=0),
             parameter("Create a Chart?", "should_plot", "GPBoolean", parameterType="Optional"),
@@ -2108,10 +2118,11 @@ class MultTransducerImport(object):
         wellimp.man_file = parameters[3].valueAsText
         wellimp.stbl = parameters[4].value
         wellimp.tol = parameters[5].value
-        wellimp.ovrd = parameters[6].value
-        wellimp.should_plot = parameters[7].value
-        wellimp.chart_out = parameters[8].valueAsText
-        wellimp.toexcel = parameters[9].value
+        wellimp.jumptol = parameters[6].value
+        wellimp.ovrd = parameters[7].value
+        wellimp.should_plot = parameters[8].value
+        wellimp.chart_out = parameters[9].valueAsText
+        wellimp.toexcel = parameters[10].value
         wellimp.many_wells()
         printmes(arcpy.GetMessages())
         return
