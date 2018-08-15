@@ -2033,7 +2033,7 @@ class MultTransducerImport(object):
             parameter("Manual File Location", "man_file", "DEFile"),
             parameter("Constant Stickup?", "isstbl", "GPBoolean", defaultValue=1),
             parameter("Transducer Drift Tolerance (ft)", "tol", "GPDouble", defaultValue=0.3),
-            parameter("Beginning Jump Tolerance (ft)", "jumptol", "GPDouble", defaultValue=1.0)
+            parameter("Beginning Jump Tolerance (ft)", "jumptol", "GPDouble", defaultValue=1.0),
             parameter("Override date filter? (warning: can cause duplicate data.", "ovrd", "GPBoolean",
                       parameterType="Optional", defaultValue=0),
             parameter("Create a Chart?", "should_plot", "GPBoolean", parameterType="Optional"),
