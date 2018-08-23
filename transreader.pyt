@@ -49,6 +49,7 @@ def printmes(x):
 # -----------------------------------------------------------------------------------------------------------------------
 # These functions align relative transducer reading to manual data
 
+
 def fix_drift(well, manualfile, meas='Level', corrwl='corrwl', manmeas='MeasuredDTW', outcolname='DTW_WL'):
     """Remove transducer drift from nonvented transducer data. Faster and should produce same output as fix_drift_stepwise
     Args:
@@ -114,7 +115,7 @@ def fix_drift(well, manualfile, meas='Level', corrwl='corrwl', manmeas='Measured
             last_trans_date = df.loc[df.last_valid_index(), 'julian']
 
             first_man = fcl(manualfile, breakpoints[i])
-            last_man = fcl(manualfile, breakpoints[i + 1])  # first manual measurment
+            last_man = fcl(manualfile, breakpoints[i + 1])  # first manual measurement
 
             if df.first_valid_index() < manualfile.first_valid_index():
                 first_man[manmeas] = None
@@ -239,14 +240,13 @@ class WaterElevation(object):
         df['MEASUREDDTW'] = df[dtw] * -1
         df['DTWBELOWGROUNDSURFACE'] = df['MEASUREDDTW'].apply(lambda x: x - self.stickup, 1)
         df['WATERELEVATION'] = df['DTWBELOWGROUNDSURFACE'].apply(lambda x: self.well_elev - x, 1)
-        df['TAPE'] = 0
         df['LOCATIONID'] = self.site_number
 
         df.sort_index(inplace=True)
 
         fieldnames = ['READINGDATE', 'MEASUREDLEVEL', 'MEASUREDDTW', 'DRIFTCORRECTION',
                       'TEMP', 'LOCATIONID', 'BAROEFFICIENCYLEVEL',
-                      'WATERELEVATION', 'TAPE']
+                      'WATERELEVATION']
 
         if 'Temperature' in df.columns:
             df.rename(columns={'Temperature': 'TEMP'}, inplace=True)
@@ -357,7 +357,7 @@ def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_roo
     well = new_trans_imp(well_file, jumptol=jumptol).well
     wtr_elevs = WaterElevation(wellid, well_table = well_table, conn_file_root=conn_file_root)
     man = wtr_elevs.get_gw_elevs(manual, stable_elev=stbl_elev)
-
+    well = jumpfix(well,'Level',threashold=2.0)
     try:
         baroid = wtr_elevs.well_table.loc[wellid, 'BaroLoggerType']
         printmes('{:}'.format(baroid))
@@ -378,18 +378,24 @@ def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_roo
     df = dft[0]
     df.sort_index(inplace=True)
     first_index = df.first_valid_index()
+    last_index = df.last_valid_index()
 
     # Get last reading at the specified location
-    read_max, dtw, wlelev = find_extreme(wellid)
-
+    #read_max, dtw, wlelev = find_extreme(wellid)
+    query = "LOCATIONID = {:} AND READINGDATE >= {:} AND READINGDATE <= {:}".format(wellid, first_index,last_index)
+    existing_data = table_to_pandas_dataframe(gw_reading_table, query = query)
     printmes("Last database date is {:}. First transducer reading is on {:}.".format(read_max, first_index))
 
     rowlist, fieldnames = wtr_elevs.prepare_fieldnames(df)
 
-    if (read_max is None or read_max < first_index) and (drift < drift_tol):
+    if (len(existing_data) == 0) and (drift < drift_tol):
         edit_table(rowlist, gw_reading_table, fieldnames)
         printmes(arcpy.GetMessages())
         printmes("Well {:} imported.".format(wellid))
+    elif len(existing_data) == len(df) and (drift < drift_tol):
+        printmes('Data for well {:} already exist!'.format(wellid))
+    elif len(existing_data) < len(df) and len(existing_data) > 0 and drift < drift_tol:
+        rowlist[~rowlist['READINGDATE'].isin(existing_data['READINGDATE'].values)]
     elif override and (drift < drift_tol):
         edit_table(rowlist, gw_reading_table, fieldnames)
         printmes(arcpy.GetMessages())
@@ -415,12 +421,11 @@ def upload_bp_data(df, site_number, return_df=False, overide=False, gw_reading_t
     if read_max is None or read_max < first_index or overide is True:
 
         df['MEASUREDLEVEL'] = df['Level']
-        df['TAPE'] = 0
         df['LOCATIONID'] = site_number
 
         df.sort_index(inplace=True)
 
-        fieldnames = ['READINGDATE', 'MEASUREDLEVEL', 'TEMP', 'LOCATIONID', 'TAPE']
+        fieldnames = ['READINGDATE', 'MEASUREDLEVEL', 'TEMP', 'LOCATIONID']
 
         if 'Temperature' in df.columns:
             df.rename(columns={'Temperature': 'TEMP'}, inplace=True)
@@ -463,7 +468,7 @@ def find_extreme(site_number, gw_table="UGGP.UGGPADMIN.UGS_GW_reading", extma='m
         sort = 'DESC'
     else:
         sort = 'ASC'
-    query = "LOCATIONID = '{:}'".format(site_number)
+    query = "LOCATIONID = '{: .0f}'".format(site_number)
     field_names = ['READINGDATE', 'LOCATIONID', 'MEASUREDDTW', 'WATERELEVATION']
     sql_sn = ('TOP 1', 'ORDER BY READINGDATE {:}'.format(sort))
     # use a search cursor to iterate rows
@@ -1444,7 +1449,7 @@ class baroimport(object):
 
 # ----------------------Class to import well data using arcgis interface-------------------------------------------------
 class wellimport(object):
-    """ Each function in this class represents the main operation perfored by a tool in the ArcToolbox"""
+    """ Each function in this class represents the main operation performed by a tool in the ArcToolbox"""
 
     def __init__(self):
         self.sde_conn = None
@@ -1476,8 +1481,8 @@ class wellimport(object):
         self.jumptol = 1.0
 
     def read_xle(self):
-        well = new_trans_imp(self.well_file).well
-        well.to_csv(self.save_location)
+        wellfile = new_trans_imp(self.well_file).well
+        wellfile.to_csv(self.save_location)
         return
 
     def one_well(self):
@@ -1638,7 +1643,7 @@ class wellimport(object):
             printmes('xles examined')
             csvs = csv_info_table(dirpath)
             printmes('csvs examined')
-            file_info_table = pd.concat([xles, csvs[0]])
+            file_info_table = pd.concat([xles, csvs[0]], sort=False)
         elif '.xle' in file_extension:
             xles = xle_head_table(dirpath)
             printmes('xles examined')
@@ -1656,8 +1661,10 @@ class wellimport(object):
         well_table.dropna(subset=['WellName'], inplace=True)
         well_table.to_csv(self.xledir + '/file_info_table.csv')
         printmes("Header Table with well information created at {:}/file_info_table.csv".format(self.xledir))
-        maxtime = max(pd.to_datetime(well_table['last_reading_date'])) + pd.DateOffset(days=2)
-        mintime = min(pd.to_datetime(well_table['Start_time'])) - pd.DateOffset(days=2)
+        maxtime = max(pd.to_datetime(well_table['last_reading_date']))
+        mintime = min(pd.to_datetime(well_table['Start_time']))
+        maxtimebuff = max(pd.to_datetime(well_table['last_reading_date'])) + pd.DateOffset(days=2)
+        mintimebuff = min(pd.to_datetime(well_table['Start_time'])) - pd.DateOffset(days=2)
         printmes("Data span from {:} to {:}.".format(mintime, maxtime))
 
         # upload barometric pressure data
@@ -1668,12 +1675,12 @@ class wellimport(object):
         if maxtime > datetime.datetime.today():
             lastdate = None
         else:
-            lastdate = maxtime
+            lastdate = maxtimebuff
 
         if len(baros) < 1:
             baros = [9024, 9025, 9027, 9049, 9061, 9003, 9062]
 
-            baro_out = get_location_data(baros, self.sde_conn, first_date=mintime, last_date=lastdate)
+            baro_out = get_location_data(baros, self.sde_conn, first_date=mintimebuff, last_date=lastdate)
 
             printmes('Barometer data download success')
 
@@ -2069,7 +2076,27 @@ class MultTransducerImport(object):
                 loc_names_simp = [i.upper().replace(" ", "").replace("-", "") for i in loc_names]
                 loc_dict = dict(zip(loc_names_simp, loc_names))
                 id_dict = dict(zip(well_ident, loc_names))
-
+                serialdict = {'1044546': 'P1001', '1044532': 'P1002', '1044519': 'P1003',
+                              '1044531': 'P1004', '1044524': 'P1005', '1044506': 'P1006', '1044545': 'P1007',
+                              '1044547': 'P1008', '1044530': 'P1009', '1044508': 'P1010', '1044536': 'P1011',
+                              '1044543': 'P1012', '1044544': 'P1013', '1044538': 'P1014', '1044504': 'P1015',
+                              '1044535': 'P1016', '1044516': 'P1018', '1044526': 'P1019', '1044517': 'P1020',
+                              '1044539': 'P1021', '1044520': 'P1022', '1044529': 'P1023', '1044502': 'P1024',
+                              '1044507': 'P1025', '1044528': 'P1026', '1046310': 'P1028', '1046323': 'P1029',
+                              '1046314': 'P1030', '1046393': 'P1031', '1046394': 'P1033', '1046388': 'P1035',
+                              '1046396': 'P1036', '1046382': 'P1037', '1046399': 'P1038', '1046315': 'P1039',
+                              '1046392': 'P1040', '1046319': 'P1041', '1046309': 'P1042', '1046398': 'P1043',
+                              '1046381': 'P1044', '1046387': 'P1045', '1046390': 'P1046', '1046400': 'P1047',
+                              '1044534': 'P1097', '1044548': 'P1049', '1044537': 'P1051', '1046311': 'P1052',
+                              '1046377': 'P1053', '1046318': 'P1054', '1046326': 'P1055', '1046395': 'P1056',
+                              '1046391': 'P1057', '1046306': 'P1060', '2011070': 'P1061', '2011072': 'P1063',
+                              '2011762': 'P1065', '2012196': 'P1070', '2022358': 'P1076', '2006774': 'P1069',
+                              '2022498': 'P1071', '2022489': 'P1072', '2010753': 'P1090', '2022490': 'P1073',
+                              '2022401': 'P1075', '2022348': 'P2001', '2022496': 'P2002', '2022499': 'P1079',
+                              '2022501': 'P1080', '2022167': 'P1081', '1046308': 'P1091', '2011557': 'P1092',
+                              '1046384': 'P1093', '1046307': 'P1094', '1046317': 'P1095', '1044541': 'P1096',
+                              '1046312': 'P1098', '2037596': 'P2003', '2037610': 'P3001', '2037607': 'P3002',
+                              '2006781': 'P3003'}
                 vtab = []
                 for file in os.listdir(parameters[1].valueAsText):
                     filetype = os.path.splitext(parameters[1].valueAsText + file)[1]
@@ -2078,6 +2105,7 @@ class MultTransducerImport(object):
                         namepartA = nameparts[0].upper().replace("-", "")
                         namepartB = str(' '.join(nameparts[:-1])).upper().replace(" ", "").replace("-", "")
                         nameparts_alt = str(file).split('_')
+                        nameparts_alt2 = str(file).split('.')
                         if len(nameparts_alt) > 3:
                             namepartC = str(' '.join(nameparts_alt[1:-3])).upper().replace(" ", "")
                             namepartD = str(nameparts_alt[-4])
@@ -2091,6 +2119,8 @@ class MultTransducerImport(object):
                             vtab.append([file, loc_dict.get(namepartC)])
                         elif len(nameparts_alt) > 3 and namepartD in well_ident:
                             vtab.append([file, id_dict.get(namepartD)])
+                        elif nameparts_alt2[0] in serialdict.keys():
+                            vtab.append([file, serialdict.get(nameparts_alt2[0])])
                         else:
                             vtab.append([file, None])
 
@@ -2260,8 +2290,10 @@ class XLERead(object):
 
     def execute(self, parameters, messages):
         wellimp = wellimport()
+
         wellimp.well_file = parameters[0].valueAsText
         wellimp.save_location = parameters[1].valueAsText
+        wellimp.read_xle()
         printmes(arcpy.GetMessages())
 
 class GapData(object):
