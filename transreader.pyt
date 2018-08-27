@@ -382,9 +382,9 @@ def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_roo
 
     # Get last reading at the specified location
     #read_max, dtw, wlelev = find_extreme(wellid)
-    query = "LOCATIONID = {:} AND READINGDATE >= {:} AND READINGDATE <= {:}".format(wellid, first_index,last_index)
+    query = "LOCATIONID = '{: .0f}' AND READINGDATE >= '{:}' AND READINGDATE <= '{:}'".format(wellid, first_index,last_index)
     existing_data = table_to_pandas_dataframe(gw_reading_table, query = query)
-    printmes("Last database date is {:}. First transducer reading is on {:}.".format(read_max, first_index))
+    #printmes("Last database date is {:}. First transducer reading is on {:}.".format(read_max, first_index))
 
     rowlist, fieldnames = wtr_elevs.prepare_fieldnames(df)
 
@@ -395,7 +395,7 @@ def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_roo
     elif len(existing_data) == len(df) and (drift < drift_tol):
         printmes('Data for well {:} already exist!'.format(wellid))
     elif len(existing_data) < len(df) and len(existing_data) > 0 and drift < drift_tol:
-        rowlist[~rowlist['READINGDATE'].isin(existing_data['READINGDATE'].values)]
+        rowlist = rowlist[~rowlist['READINGDATE'].isin(existing_data['READINGDATE'].values)]
     elif override and (drift < drift_tol):
         edit_table(rowlist, gw_reading_table, fieldnames)
         printmes(arcpy.GetMessages())
