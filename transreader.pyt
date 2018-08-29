@@ -358,6 +358,7 @@ def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_roo
     wtr_elevs = WaterElevation(wellid, well_table = well_table, conn_file_root=conn_file_root)
     man = wtr_elevs.get_gw_elevs(manual, stable_elev=stbl_elev)
     well = jumpfix(well,'Level',threashold=2.0)
+
     try:
         baroid = wtr_elevs.well_table.loc[wellid, 'BaroLoggerType']
         printmes('{:}'.format(baroid))
@@ -382,9 +383,9 @@ def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_roo
 
     # Get last reading at the specified location
     #read_max, dtw, wlelev = find_extreme(wellid)
-    query = "LOCATIONID = {: .0f} AND READINGDATE >= '{:}' AND READINGDATE <= '{:}'".format(wellid, first_index,last_index)
+    query = "LOCATIONID = {: .0f} AND READINGDATE >= '{:}' AND READINGDATE <= '{:}'".format(wellid, first_index, last_index)
     existing_data = table_to_pandas_dataframe(gw_reading_table, query = query)
-    #printmes("Last database date is {:}. First transducer reading is on {:}.".format(read_max, first_index))
+    printmes("Existing Len = {:}. Import Len = {:}.".format(len(existing_data),len(df)))
 
     rowlist, fieldnames = wtr_elevs.prepare_fieldnames(df)
 
@@ -394,8 +395,9 @@ def simp_imp_well(well_table, well_file, baro_out, wellid, manual, conn_file_roo
         printmes("Well {:} imported.".format(wellid))
     elif len(existing_data) == len(df) and (drift < drift_tol):
         printmes('Data for well {:} already exist!'.format(wellid))
-    elif len(existing_data) < len(df) and len(existing_data) > 0 and drift < drift_tol:
+    elif len(df) > len(existing_data) > 0 and drift < drift_tol:
         rowlist = rowlist[~rowlist['READINGDATE'].isin(existing_data['READINGDATE'].values)]
+        edit_table(rowlist, gw_reading_table, fieldnames)
         printmes('Some values were missing. {:} values added.'.format(len(df)-len(existing_data)))
     elif override and (drift < drift_tol):
         edit_table(rowlist, gw_reading_table, fieldnames)
